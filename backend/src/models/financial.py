@@ -26,9 +26,9 @@ class FinancialRecord(Base, TimestampMixin):
     project_uuid = Column(
         UUID(as_uuid=True),
         ForeignKey("projects.project_uuid", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
-        comment="Reference to parent project",
+        comment="Reference to parent project (NULL until entity resolution)",
     )
 
     # Source Information

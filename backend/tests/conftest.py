@@ -37,7 +37,13 @@ def test_db(test_engine):
     db = TestingSessionLocal()
     try:
         yield db
+        # Rollback any uncommitted changes
+        db.rollback()
     finally:
+        # Clean up all tables after each test
+        for table in reversed(Base.metadata.sorted_tables):
+            db.execute(table.delete())
+        db.commit()
         db.close()
 
 
