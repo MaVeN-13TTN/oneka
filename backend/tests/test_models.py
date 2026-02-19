@@ -47,7 +47,7 @@ class TestProjectModel:
         """Test project relationships cascade"""
         project = Project(
             project_name="Test Road",
-            project_type=ProjectType.ROADS_TRANSPORT,
+            project_type=ProjectType.ROADS,
             county="Kiambu",
             status=ProjectStatus.ONGOING,
         )
@@ -58,6 +58,7 @@ class TestProjectModel:
         # Add related records
         procurement = ProcurementRecord(
             project_uuid=project.project_uuid,
+            source_system="PPIP",
             tender_number="TEST/2026/001",
             contractor_name="ABC Construction",
         )
@@ -77,7 +78,7 @@ class TestProcurementRecordModel:
         """Test creating procurement record"""
         project = Project(
             project_name="Test Project",
-            project_type=ProjectType.WATER_SANITATION,
+            project_type=ProjectType.WATER,
             county="Mombasa",
             status=ProjectStatus.AWARDED,
         )
@@ -86,6 +87,7 @@ class TestProcurementRecordModel:
 
         procurement = ProcurementRecord(
             project_uuid=project.project_uuid,
+            source_system="PPIP",
             tender_number="MOH/2026/0089",
             contractor_name="XYZ Ltd",
             award_date=date(2026, 1, 15),
@@ -138,7 +140,7 @@ class TestFinancialRecordModel:
         """Test creating financial record"""
         project = Project(
             project_name="Finance Test",
-            project_type=ProjectType.ENERGY,
+            project_type=ProjectType.OTHER,
             county="Kisumu",
             status=ProjectStatus.ONGOING,
         )
@@ -147,9 +149,10 @@ class TestFinancialRecordModel:
 
         financial = FinancialRecord(
             project_uuid=project.project_uuid,
+            source_system="COB",
             fiscal_year="2025/2026",
-            budget_allocated=Decimal("300000000.00"),
-            budget_absorbed=Decimal("180000000.00"),
+            budget_allocated_kes=Decimal("300000000.00"),
+            budget_absorbed_kes=Decimal("180000000.00"),
             absorption_rate=Decimal("60.0"),
         )
 
@@ -157,7 +160,7 @@ class TestFinancialRecordModel:
         test_db.commit()
         test_db.refresh(financial)
 
-        assert financial.budget_allocated == Decimal("300000000.00")
+        assert financial.budget_allocated_kes == Decimal("300000000.00")
         assert financial.absorption_rate == Decimal("60.0")
 
 
@@ -168,7 +171,7 @@ class TestSatelliteAnalysisModel:
         """Test creating satellite analysis"""
         project = Project(
             project_name="Satellite Test",
-            project_type=ProjectType.AGRICULTURE,
+            project_type=ProjectType.OTHER,
             county="Eldoret",
             status=ProjectStatus.ONGOING,
         )
@@ -177,10 +180,11 @@ class TestSatelliteAnalysisModel:
 
         satellite = SatelliteAnalysis(
             project_uuid=project.project_uuid,
-            analysis_date=date(2026, 2, 9),
-            satellite_source="Sentinel-2",
-            ndvi_value=Decimal("0.65"),
-            sar_intensity=Decimal("0.42"),
+            sensor="Sentinel-2",
+            acquisition_date=date(2026, 2, 9),
+            analysis_type="NDVI_change",
+            ndvi_mean=Decimal("0.65"),
+            sar_vv_mean=Decimal("-12.42"),
             change_detected=True,
         )
 
@@ -188,6 +192,6 @@ class TestSatelliteAnalysisModel:
         test_db.commit()
         test_db.refresh(satellite)
 
-        assert satellite.satellite_source == "Sentinel-2"
-        assert satellite.ndvi_value == Decimal("0.65")
+        assert satellite.sensor == "Sentinel-2"
+        assert satellite.ndvi_mean == Decimal("0.65")
         assert satellite.change_detected is True
