@@ -1,0 +1,3 @@
+project_name,county,latitude,longitude,award_date,completion_date,budget_kes,status,evidence_source
+"Example Hospital Construction","Kiambu",-1.0332,36.8856,"2022-01-15","2023-12-31",350000000,"success","OAG Audit Report 2024"
+"Example Road Rehabilitation","Mombasa",-4.0435,39.6682,"2021-06-01","2023-05-30",500000000,"ghost","EACC Investigation Report"
