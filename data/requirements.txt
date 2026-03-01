@@ -1,0 +1,67 @@
+# ONEKA AI - Data Layer Dependencies (scrapers + parsers)
+# Python 3.12
+#
+# This module contains the raw data-acquisition layer:
+#   data/scrapers/   — async scrapers for e-GP, PPIP, COB, NCA, KMHFL
+#   data/parsers/    — COB BIRR PDF parser
+#
+# Setup (uv — run from inside data/):
+#   uv venv venv-data --python 3.12
+#   source venv-data/bin/activate
+#   uv pip install -r requirements.txt
+#   playwright install chromium  # for NCA and KMHFL JS-heavy pages
+
+# ============================================================================
+# HTTP & Scraping
+# ============================================================================
+
+httpx==0.26.0
+beautifulsoup4==4.12.3
+lxml==5.1.0
+playwright==1.41.2
+
+# ============================================================================
+# PDF Parsing (COB BIRR fiscal reports)
+# ============================================================================
+
+pdfplumber==0.10.3
+
+# ============================================================================
+# Database (async SQLAlchemy — shares schema with backend/)
+# ============================================================================
+
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+alembic==1.13.1
+
+# ============================================================================
+# Data Processing
+# ============================================================================
+
+pandas==2.1.4
+
+# ============================================================================
+# NLP & Entity Resolution (geolocation pipeline — three-tier strategy)
+# ============================================================================
+
+spacy==3.7.2
+# After install, download the English model:
+#   python -m spacy download en_core_web_sm
+rapidfuzz==3.6.1
+
+# ============================================================================
+# Utilities
+# ============================================================================
+
+python-dotenv==1.0.0
+
+# ============================================================================
+# Testing & Development
+# ============================================================================
+
+pytest==7.4.4
+pytest-cov==4.1.0
+pytest-asyncio==0.23.3
+black==23.12.1
+flake8==7.0.0
+mypy==1.8.0

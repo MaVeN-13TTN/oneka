@@ -1,0 +1,55 @@
+# =============================================================================
+# data/ — scrapers + parsers module
+# =============================================================================
+
+# Virtual environment
+venv-data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Downloaded / scraped raw data (can be large)
+raw/
+downloads/
+cache/
+*.json.tmp
+
+# Parsed output files (intermediate artefacts)
+output/
+parsed/
+
+# PDF cache (COB BIRR documents can be large)
+pdfs/
+*.pdf
+
+# Logs
+logs/
+*.log
+
+# Playwright browser binaries (installed separately via `playwright install`)
+playwright-browsers/
+
+# Testing & coverage
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Type checking
+.mypy_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
