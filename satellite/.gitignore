@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+
+# Logs
+logs/
+*.log
+
+# Data directories
+data/raw/
+data/processed/
+!data/training/training_projects_template.csv
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# SNAP temporary files
+*.dim
+*.properties
+
+# Satellite data
+*.SAFE/
+*.zip
+*.tar
+*.gz
+
+# GeoTIFF files (large)
+*.tif
+*.tiff
+
+# Outputs
+*.png
+*.jpg
+*.jpeg
+
+# macOS
+.DS_Store
+
+# Coverage
+.coverage
+htmlcov/
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
