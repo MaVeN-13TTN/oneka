@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     # Data Sources
     ppip_base_url: str = "https://tenders.go.ke"
-    kmhfl_api_url: str = "http://kmhfl.health.go.ke/api"
+    kmhfl_api_url: str = "https://api.kmhfr.health.go.ke/api"
 
     # Logging
     log_level: str = "INFO"
