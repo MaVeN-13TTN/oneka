@@ -18,6 +18,8 @@ sqlalchemy==2.0.25
 alembic==1.13.1
 psycopg2-binary==2.9.9
 geoalchemy2==0.14.3
+shapely==2.0.2
+numpy==1.26.4
 
 # HTTP and Data Processing
 requests==2.31.0
