@@ -1,11 +1,13 @@
 import asyncio
 import re
 from datetime import datetime
-from backend.models.tenders import NCAProject
-from backend.db import AsyncSessionLocal
-from sqlalchemy.dialects.postgresql import insert
+
 from playwright.async_api import async_playwright
-from backend.scrapers.base import BaseScraper, logger
+from sqlalchemy.dialects.postgresql import insert
+
+from .base import BaseScraper, logger
+from ..db import AsyncSessionLocal
+from ..models import procurement_records
 
 class NCAScraper(BaseScraper):
     BASE_URL = "https://www.nca.go.ke/approved-projects"
@@ -88,40 +90,43 @@ class NCAScraper(BaseScraper):
             return list(unique_rows.values())
 
     async def save(self, rows):
+        """
+        Upserts NCA approved projects into procurement_records.
+        NCA project_id is namespaced as 'NCA-<id>' to avoid clashes
+        with tender numbers from other source systems.
+        """
         async with AsyncSessionLocal() as session:
             count = 0
             for row in rows:
                 if len(row) < 7:
                     continue
-                    
-                # Parse row
-                # 0: ProjectID, 1: Name, 2: Developer, 3: Contractor, 4: Architect, 5: Engineer, 6: Type
+
+                # 0:ProjectID 1:Name 2:Developer 3:Contractor 4:Architect 5:Engineer 6:Type
+                nca_id = f"NCA-{row[0]}"
                 project_data = {
-                    "project_id": row[0],
-                    "project_name": row[1],
-                    "developer": row[2],
-                    "contractor": row[3],
-                    "architect": row[4],
-                    "engineer": row[5],
-                    "project_type": row[6],
-                    "status": "Registered", # Inferred since it is in the "Approved Projects" list
-                    "raw_data": row
+                    "tender_number": nca_id,
+                    "tender_title": row[1],
+                    "procuring_entity": row[2],  # developer acts as procuring entity
+                    "contractor_name": row[3],
+                    "source_system": "NCA",
+                    "extraction_method": "playwright_scrape",
                 }
-                
-                # Upsert
-                stmt = insert(NCAProject).values(project_data)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=['project_id'],
-                    set_=project_data
+
+                stmt = (
+                    insert(procurement_records)
+                    .values(project_data)
+                    .on_conflict_do_update(
+                        index_elements=["tender_number"],
+                        set_=project_data,
+                    )
                 )
-                
+
                 try:
                     await session.execute(stmt)
                     count += 1
                 except Exception as e:
-                    logger.error(f"DB Error: {e}")
-                    # await session.rollback() # Save what we can?
-            
+                    logger.error(f"DB Error on {nca_id}: {e}")
+
             try:
                 await session.commit()
             except Exception as e:
