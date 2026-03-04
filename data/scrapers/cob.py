@@ -1,10 +1,18 @@
-import httpx
 import asyncio
+import json
 import os
-from bs4 import BeautifulSoup
-from backend.db import AsyncSessionLocal
-from backend.models.tenders import FiscalReport
-from sqlalchemy.future import select
+from pathlib import Path
+
+import httpx
+
+from .base import BaseScraper, logger
+
+# Downloaded report metadata is tracked in a JSON cache file.
+# FinancialService.ingest_cob_report() processes each PDF and writes
+# rows to financial_records. A dedicated fiscal_reports DB table
+# is planned for Phase 2 migration 003_add_fiscal_reports.py.
+CACHE_PATH = Path(__file__).parent.parent / "cache" / "cob_reports.json"
+
 
 class CoBPoller:
     REPORTS_URL = "https://cob.go.ke/reports/consolidated-county-budget-implementation-review-reports/"
@@ -114,27 +122,52 @@ class CoBPoller:
                 return None
 
     async def process(self):
+        """
+        Polls the COB website for BIRR report PDFs, downloads new ones,
+        and persists their metadata to data/cache/cob_reports.json.
+
+        FinancialService.ingest_cob_report() later parses each PDF and
+        writes FinancialRecord rows to the database.
+        """
         reports = await self.find_reports()
-        
-        async with AsyncSessionLocal() as session:
-            for rep in reports:
-                # Check DB
-                stmt = select(FiscalReport).where(FiscalReport.source_url == rep['url'])
-                result = await session.execute(stmt)
-                existing = result.scalar_one_or_none()
-                
-                if not existing:
-                    local_path = await self.download_report(rep['url'], rep['title'])
-                    if local_path:
-                        new_report = FiscalReport(
-                            title=rep['title'],
-                            source_url=rep['url'],
-                            local_path=local_path,
-                            status="downloaded"
-                        )
-                        session.add(new_report)
-            
-            await session.commit()
+        if not reports:
+            logger.warning("CoBPoller: no report links found.")
+            return
+
+        # Load existing cache
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        existing: list = []
+        if CACHE_PATH.exists():
+            try:
+                existing = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                existing = []
+
+        known_urls = {r["url"] for r in existing}
+
+        for rep in reports:
+            if rep["url"] in known_urls:
+                logger.info(f"CoBPoller: already cached — {rep['title']}")
+                continue
+
+            local_path = await self.download_report(rep["url"], rep["title"])
+            if local_path:
+                existing.append(
+                    {
+                        "title": rep["title"],
+                        "url": rep["url"],
+                        "local_path": local_path,
+                        "status": "downloaded",
+                    }
+                )
+                logger.info(f"CoBPoller: downloaded — {rep['title']}")
+
+        CACHE_PATH.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info(
+            f"CoBPoller: cache updated — {len(existing)} reports at {CACHE_PATH}"
+        )
 
 if __name__ == "__main__":
     poller = CoBPoller()

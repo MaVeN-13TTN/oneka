@@ -106,6 +106,37 @@ class ProcurementRecord(Base, TimestampMixin):
         Text, nullable=True, comment="Full extracted text from PDF for search"
     )
 
+    # EGP GPS Fields (added migration 002 — c1624cd13ed2)
+    egp_tender_id = Column(
+        String,
+        nullable=True,
+        comment="Internal eGP tender ID from API response",
+    )
+
+    delivery_latitude = Column(
+        DECIMAL(10, 7),
+        nullable=True,
+        comment="Delivery location latitude from eGP (Tier 1 GPS)",
+    )
+
+    delivery_longitude = Column(
+        DECIMAL(10, 7),
+        nullable=True,
+        comment="Delivery location longitude from eGP (Tier 1 GPS)",
+    )
+
+    gps_source = Column(
+        String(50),
+        nullable=True,
+        comment="GPS origin: EGP_MANUAL_PIN | EGP_AUTO_GEOCODED | KMHFL_MATCHED | WARD_CENTROID",
+    )
+
+    gps_quality_score = Column(
+        Integer,
+        nullable=True,
+        comment="GPS quality 0-100: manual pin=90, auto=70, fuzzy match=60-80, ward=20",
+    )
+
     # Data Quality
     data_quality = Column(
         Integer, nullable=True, comment="OCR/extraction quality score 0-100"
