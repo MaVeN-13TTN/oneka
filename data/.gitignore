@@ -20,7 +20,8 @@ __pycache__/
 # Downloaded / scraped raw data (can be large)
 raw/
 downloads/
-cache/
+cache/*
+!cache/.gitkeep
 *.json.tmp
 
 # Parsed output files (intermediate artefacts)
