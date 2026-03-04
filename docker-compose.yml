@@ -1,0 +1,93 @@
+version: "3.9"
+
+# Oneka AI — Local Development Stack
+# Usage:
+#   docker-compose up -d          # start all services
+#   docker-compose down           # stop all services
+#   docker-compose logs -f api    # tail API logs
+
+services:
+  # ── PostgreSQL 15 + PostGIS 3.4 ──────────────────────────────────────────
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: oneka-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: oneka_user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: oneka_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/setup_database.sql:/docker-entrypoint-initdb.d/01_setup.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oneka_user -d oneka_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis 7 (Celery broker + result backend) ──────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: oneka-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI backend ───────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: oneka-api
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://oneka_user:password@postgres:5432/oneka_dev
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # ── Celery worker ─────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: oneka-worker
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://oneka_user:password@postgres:5432/oneka_dev
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A src.celery_app worker --loglevel=info --concurrency=4
+
+volumes:
+  postgres_data:
+  redis_data:
