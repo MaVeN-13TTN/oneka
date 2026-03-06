@@ -90,6 +90,14 @@ satellite/logs/*.log
 *.geojson.tmp
 
 # =============================================================================
+# Downloaded Boundary / Reference Data (one-time setup artefacts, not source)
+# =============================================================================
+backend/ken_adm_geojson/
+backend/ken_adm3_wards.geojson
+backend/ken_admin_boundaries.geojson.zip
+*.geojson.zip
+
+# =============================================================================
 # AWS / Cloud
 # =============================================================================
 .aws/

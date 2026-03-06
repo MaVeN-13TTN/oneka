@@ -21,6 +21,7 @@ def create_celery_app() -> Celery:
         backend=settings.redis_url,
         include=[
             "src.tasks.ingestion_tasks",
+            "src.tasks.satellite_tasks",
         ],
     )
 

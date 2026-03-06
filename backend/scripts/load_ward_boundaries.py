@@ -47,11 +47,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── property field variants across UNOCHA GeoJSON releases ────────────────────
+# OCHA HDX COD uses lowercase (adm2_name, adm1_name); IEBC uses ADM3_EN etc.
 
-_WARD_FIELDS = ["ADM3_EN", "shapeName", "WARD_NAME", "NAME_3", "ward_name", "Name"]
-_CONST_FIELDS = ["ADM2_EN", "CONST_NAME", "NAME_2", "constituency"]
-_COUNTY_FIELDS = ["ADM1_EN", "COUNTY_NAM", "NAME_1", "county"]
-_WARD_CODE_FIELDS = ["ADM3_PCODE", "WARD_CODE", "ADM3_CODE", "ward_code"]
+_WARD_FIELDS = [
+    # IEBC / OCHA high-res releases
+    "ADM3_EN", "shapeName", "WARD_NAME", "NAME_3", "ward_name",
+    # OCHA HDX COD (lowercase) — ADM2 constituency used as Tier-3 fallback
+    "adm3_name", "adm2_name",
+    # geoBoundaries / generic
+    "Name", "name",
+]
+_CONST_FIELDS = [
+    "ADM2_EN", "CONST_NAME", "NAME_2", "constituency",
+    "adm2_name", "adm2_ref_name",
+]
+_COUNTY_FIELDS = [
+    "ADM1_EN", "COUNTY_NAM", "NAME_1", "county",
+    "adm1_name",
+]
+_WARD_CODE_FIELDS = [
+    "ADM3_PCODE", "WARD_CODE", "ADM3_CODE", "ward_code",
+    "adm3_pcode", "adm2_pcode",
+]
+# Pre-computed centroid field variants (skip geometry computation when present)
+_CENTROID_LAT_FIELDS = ["center_lat", "y_coord", "lat", "latitude"]
+_CENTROID_LON_FIELDS = ["center_lon", "x_coord", "lon", "longitude"]
 
 
 def _get(props: dict, candidates: list[str]) -> str | None:
@@ -145,6 +165,11 @@ def load_boundaries(geojson_path: str, db_url: str | None = None) -> int:
             props = feat.get("properties") or {}
             geometry = feat.get("geometry")
 
+            # Skip country-level centroids (admin_level == 0 in admincentroids file)
+            if props.get("admin_level") == 0:
+                skipped += 1
+                continue
+
             ward_name = _get(props, _WARD_FIELDS)
             if not ward_name:
                 skipped += 1
@@ -154,9 +179,16 @@ def load_boundaries(geojson_path: str, db_url: str | None = None) -> int:
             constituency = _get(props, _CONST_FIELDS)
             county = _get(props, _COUNTY_FIELDS)
 
-            centroid = _compute_centroid(geometry) if geometry else None
-            centroid_lat = centroid[0] if centroid else None
-            centroid_lon = centroid[1] if centroid else None
+            # Use pre-computed centroid when available (faster + no shapely needed)
+            pre_lat = _get(props, _CENTROID_LAT_FIELDS)
+            pre_lon = _get(props, _CENTROID_LON_FIELDS)
+            if pre_lat is not None and pre_lon is not None:
+                centroid_lat = float(pre_lat)
+                centroid_lon = float(pre_lon)
+            else:
+                centroid = _compute_centroid(geometry) if geometry else None
+                centroid_lat = centroid[0] if centroid else None
+                centroid_lon = centroid[1] if centroid else None
 
             geom_wkt = _build_multipolygon_wkt(geometry) if geometry else None
 
