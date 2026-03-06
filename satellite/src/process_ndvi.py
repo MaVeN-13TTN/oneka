@@ -5,16 +5,17 @@ This module processes Sentinel-2 L2A scenes to calculate NDVI and detect
 vegetation clearing patterns indicative of construction activity.
 """
 
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import rasterio
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 from loguru import logger
 
 try:
@@ -33,6 +34,44 @@ from src.utils import (
     ensure_directory,
     format_scene_id,
 )
+
+
+def compute_ndvi_slope(
+    dates: List[str], ndvi_means: List[float]
+) -> Optional[float]:
+    """
+    Compute linear regression slope of NDVI over time.
+
+    Uses numpy polyfit on (months elapsed, ndvi_mean) pairs.  Any NaN values
+    are excluded before fitting.  Requires at least 2 valid observations.
+
+    Args:
+        dates:      ISO-8601 date strings ('YYYY-MM-DD'), parallel to ndvi_means.
+        ndvi_means: Corresponding mean NDVI values.
+
+    Returns:
+        Slope in NDVI units per month, or None if < 2 valid data points.
+
+    Interpretation:
+        Negative slope → NDVI declining over time → land clearing / construction
+        Positive slope → NDVI increasing → vegetation recovery, no construction
+    """
+    if len(dates) < 2 or len(ndvi_means) < 2:
+        return None
+
+    base = datetime.strptime(dates[0], "%Y-%m-%d")
+    x = np.array(
+        [(datetime.strptime(d, "%Y-%m-%d") - base).days / 30.44 for d in dates],
+        dtype=float,
+    )
+    y = np.array(ndvi_means, dtype=float)
+
+    valid = np.isfinite(y)
+    if valid.sum() < 2:
+        return None
+
+    coeffs = np.polyfit(x[valid], y[valid], 1)
+    return float(coeffs[0])  # slope in NDVI/month
 
 
 class NDVIProcessor:
@@ -63,24 +102,19 @@ class NDVIProcessor:
         Load Red (B04) and NIR (B08) bands using Satpy.
 
         Returns:
-            Tuple of (NDVI array, metadata dict)
+            Tuple of (red array, nir array, metadata dict)
         """
         if not SATPY_AVAILABLE:
             raise ImportError("Satpy is required but not installed")
 
         logger.info("Loading bands with Satpy...")
 
-        # Create Satpy Scene
         scn = Scene(reader="msi_safe", filenames=[str(self.scene_path)])
+        scn.load(["B04", "B08"])
 
-        # Load required bands
-        scn.load(["B04", "B08"])  # Red, NIR
-
-        # Extract arrays
         red = scn["B04"].values
         nir = scn["B08"].values
 
-        # Get metadata
         metadata = {
             "crs": scn["B04"].attrs.get("area").crs,
             "transform": scn["B04"].attrs.get("area").area_extent,
@@ -88,38 +122,35 @@ class NDVIProcessor:
         }
 
         logger.info(f"Loaded bands: Red={red.shape}, NIR={nir.shape}")
-
         return (red, nir, metadata)
 
     def load_bands_rasterio(self) -> Tuple[np.ndarray, np.ndarray, dict]:
         """
-        Load Red and NIR bands using rasterio (alternative to Satpy).
+        Load Red and NIR bands using rasterio.
 
         Returns:
             Tuple of (red_array, nir_array, metadata dict)
         """
         logger.info("Loading bands with rasterio...")
 
-        # Find band files in SAFE structure
         granule_dir = self.scene_path / "GRANULE"
         if not granule_dir.exists():
-            raise FileNotFoundError(f"GRANULE directory not found in {self.scene_path}")
+            raise FileNotFoundError(
+                f"GRANULE directory not found in {self.scene_path}"
+            )
 
-        # Get first granule
         granules = list(granule_dir.iterdir())
         if not granules:
             raise FileNotFoundError("No granules found in SAFE directory")
 
         img_data_dir = granules[0] / "IMG_DATA" / "R10m"
 
-        # Find B04 (Red) and B08 (NIR) files
         b04_files = list(img_data_dir.glob("*B04_10m.jp2"))
         b08_files = list(img_data_dir.glob("*B08_10m.jp2"))
 
         if not b04_files or not b08_files:
             raise FileNotFoundError("B04 or B08 band files not found")
 
-        # Read bands
         with rasterio.open(b04_files[0]) as src:
             red = src.read(1).astype(np.float32)
             transform = src.transform
@@ -129,14 +160,9 @@ class NDVIProcessor:
         with rasterio.open(b08_files[0]) as src:
             nir = src.read(1).astype(np.float32)
 
-        metadata = {
-            "crs": crs,
-            "transform": transform,
-            "profile": profile,
-        }
+        metadata = {"crs": crs, "transform": transform, "profile": profile}
 
         logger.info(f"Loaded bands: Red={red.shape}, NIR={nir.shape}")
-
         return (red, nir, metadata)
 
     def calculate_ndvi(
@@ -145,27 +171,11 @@ class NDVIProcessor:
         nir: np.ndarray,
         mask_clouds: bool = True,
     ) -> np.ndarray:
-        """
-        Calculate NDVI from Red and NIR bands.
-
-        Args:
-            red: Red band array
-            nir: NIR band array
-            mask_clouds: Whether to mask cloudy pixels
-
-        Returns:
-            NDVI array
-        """
+        """Calculate NDVI from Red and NIR bands."""
         logger.info("Calculating NDVI...")
-
-        # Calculate NDVI
         ndvi = calculate_ndvi(nir, red)
-
-        # Mask invalid values
         ndvi = np.where(np.isfinite(ndvi), ndvi, np.nan)
-
         logger.info(f"NDVI range: {np.nanmin(ndvi):.3f} to {np.nanmax(ndvi):.3f}")
-
         return ndvi
 
     def extract_aoi_statistics(
@@ -177,31 +187,98 @@ class NDVIProcessor:
         metadata: dict = None,
     ) -> Dict[str, float]:
         """
-        Extract NDVI statistics for Area of Interest (AOI).
+        Extract NDVI statistics for the 500 m AOI around the project site.
+
+        Applies a circular buffer centred on (lat, lon) using rasterio.mask.
+        The NDVI array is written to a temporary GeoTIFF, clipped with the
+        buffer geometry, then statistics are extracted from the clipped pixels.
+
+        Falls back to full-scene statistics if spatial masking fails.
 
         Args:
-            ndvi: NDVI array
-            lat: Center latitude
-            lon: Center longitude
-            radius_m: AOI radius in meters
-            metadata: Raster metadata with CRS and transform
+            ndvi:     Full-scene NDVI float array.
+            lat:      Project site WGS-84 latitude.
+            lon:      Project site WGS-84 longitude.
+            radius_m: Buffer radius in metres (default 500 per config.AOI_RADIUS).
+            metadata: Dict with 'crs' and 'profile' from rasterio.
 
         Returns:
-            Dictionary with statistics
+            Dict: mean, std, min, max, median, p25, p75.
         """
         logger.info(
-            f"Extracting statistics for AOI: ({lat}, {lon}), radius={radius_m}m"
+            "Extracting AOI statistics: (%.5f, %.5f), radius=%dm",
+            lat,
+            lon,
+            radius_m,
         )
 
-        # For simplicity, extract stats from entire array
-        # In production, use rasterio.mask with circular polygon
-        stats = extract_statistics(ndvi)
+        if metadata is None:
+            logger.warning("No metadata provided — using full-scene statistics")
+            return extract_statistics(ndvi)
 
-        logger.info(
-            f"NDVI statistics: mean={stats['mean']:.3f}, std={stats['std']:.3f}"
-        )
+        try:
+            import pyproj
+            from shapely.geometry import Point, mapping
+            from shapely.ops import transform as shapely_transform
 
-        return stats
+            crs = metadata.get("crs")
+            profile = metadata.get("profile", {})
+
+            if crs is None or not profile:
+                raise ValueError("Incomplete metadata (missing crs or profile)")
+
+            # Project the site centre from WGS-84 to the scene's CRS (e.g., UTM)
+            wgs84 = pyproj.CRS("EPSG:4326")
+            scene_crs = pyproj.CRS(crs)
+            transformer = pyproj.Transformer.from_crs(
+                wgs84, scene_crs, always_xy=True
+            )
+
+            point_proj = shapely_transform(
+                transformer.transform, Point(lon, lat)
+            )
+            # buffer() is in scene CRS units (metres for UTM or EASE-Grid)
+            aoi_geom = point_proj.buffer(radius_m)
+
+            # Write NDVI to a temp GeoTIFF, apply rasterio mask, extract stats
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tif")
+            os.close(tmp_fd)
+            try:
+                profile_copy = dict(profile)
+                profile_copy.update(
+                    dtype=rasterio.float32, count=1, nodata=float("nan")
+                )
+                with rasterio.open(tmp_path, "w", **profile_copy) as dst:
+                    dst.write(ndvi.astype(np.float32), 1)
+
+                with rasterio.open(tmp_path) as src:
+                    masked, _ = mask(
+                        src,
+                        [mapping(aoi_geom)],
+                        crop=True,
+                        all_touched=True,
+                        nodata=float("nan"),
+                    )
+                aoi_ndvi = masked[0]
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+            stats = extract_statistics(aoi_ndvi)
+            logger.info(
+                "AOI NDVI — mean=%.3f, std=%.3f",
+                stats.get("mean", float("nan")),
+                stats.get("std", float("nan")),
+            )
+            return stats
+
+        except Exception as exc:
+            logger.warning(
+                "AOI masking failed (%s) — using full-scene statistics", exc
+            )
+            return extract_statistics(ndvi)
 
     def save_geotiff(
         self,
@@ -209,33 +286,16 @@ class NDVIProcessor:
         output_path: Path,
         metadata: dict,
     ) -> Path:
-        """
-        Save NDVI as GeoTIFF.
-
-        Args:
-            ndvi: NDVI array
-            output_path: Output file path
-            metadata: Raster metadata
-
-        Returns:
-            Path to saved file
-        """
+        """Save NDVI as a compressed GeoTIFF."""
         logger.info(f"Saving GeoTIFF: {output_path}")
 
-        # Update profile for single-band float output
         profile = metadata.get("profile", {})
-        profile.update(
-            dtype=rasterio.float32,
-            count=1,
-            compress="lzw",
-            nodata=np.nan,
-        )
+        profile.update(dtype=rasterio.float32, count=1, compress="lzw", nodata=np.nan)
 
         with rasterio.open(output_path, "w", **profile) as dst:
             dst.write(ndvi.astype(np.float32), 1)
 
         logger.info(f"Saved: {output_path}")
-
         return output_path
 
     def create_visualization(
@@ -244,47 +304,21 @@ class NDVIProcessor:
         output_path: Path,
         title: Optional[str] = None,
     ) -> Path:
-        """
-        Create NDVI visualization (color-coded map).
-
-        Args:
-            ndvi: NDVI array
-            output_path: Output PNG path
-            title: Plot title
-
-        Returns:
-            Path to saved image
-        """
+        """Create an RdYlGn colour-coded NDVI PNG."""
         logger.info(f"Creating visualization: {output_path}")
 
-        # Create figure
         fig, ax = plt.subplots(figsize=(10, 8))
-
-        # Color map: Red (bare) -> Yellow -> Green (vegetation)
         cmap = plt.get_cmap("RdYlGn")
-
-        # Plot NDVI
         im = ax.imshow(ndvi, cmap=cmap, vmin=-0.2, vmax=0.8)
-
-        # Add colorbar
         cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.set_label("NDVI", rotation=270, labelpad=20)
-
-        # Title
-        if title:
-            ax.set_title(title, fontsize=14, fontweight="bold")
-        else:
-            ax.set_title(f"NDVI - {self.scene_id}", fontsize=14)
-
+        ax.set_title(title or f"NDVI - {self.scene_id}", fontsize=14)
         ax.axis("off")
-
-        # Save
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close()
 
         logger.info(f"Saved visualization: {output_path}")
-
         return output_path
 
     def process(
@@ -298,29 +332,26 @@ class NDVIProcessor:
         Complete NDVI processing workflow.
 
         Args:
-            lat: Center latitude for AOI
-            lon: Center longitude for AOI
-            output_dir: Output directory
-            use_satpy: Use Satpy (True) or rasterio (False)
+            lat:        Site centre latitude (WGS-84).
+            lon:        Site centre longitude (WGS-84).
+            output_dir: Directory for GeoTIFF and PNG outputs.
+            use_satpy:  Use Satpy (True) or rasterio (False, default).
 
         Returns:
-            Dictionary with results
+            Dict with scene_id, sensor, statistics, geotiff_path,
+            visualization_path, processed_date.
         """
         logger.info("Starting NDVI processing workflow...")
-
-        # Ensure output directory exists
         ensure_directory(output_dir)
 
-        # Load bands
         if use_satpy and SATPY_AVAILABLE:
             red, nir, metadata = self.load_bands_satpy()
         else:
             red, nir, metadata = self.load_bands_rasterio()
 
-        # Calculate NDVI
         ndvi = self.calculate_ndvi(red, nir)
 
-        # Extract statistics
+        # Extract stats within the 500 m AOI polygon
         stats = self.extract_aoi_statistics(
             ndvi=ndvi,
             lat=lat,
@@ -329,15 +360,12 @@ class NDVIProcessor:
             metadata=metadata,
         )
 
-        # Save GeoTIFF
         geotiff_path = output_dir / f"{self.scene_id}_NDVI.tif"
         self.save_geotiff(ndvi, geotiff_path, metadata)
 
-        # Create visualization
         viz_path = output_dir / f"{self.scene_id}_NDVI.png"
         self.create_visualization(ndvi, viz_path)
 
-        # Prepare results
         results = {
             "scene_id": self.scene_id,
             "sensor": "Sentinel-2",
@@ -348,61 +376,40 @@ class NDVIProcessor:
         }
 
         logger.info("NDVI processing complete")
-
         return results
 
 
 def main():
-    """
-    Command-line interface for NDVI processing.
-    """
+    """Command-line interface for NDVI processing."""
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Calculate NDVI from Sentinel-2 imagery"
     )
-
-    parser.add_argument(
-        "--scene", type=str, required=True, help="Path to Sentinel-2 SAFE directory"
-    )
-    parser.add_argument("--lat", type=float, required=True, help="Center latitude")
-    parser.add_argument("--lon", type=float, required=True, help="Center longitude")
+    parser.add_argument("--scene", type=str, required=True,
+                        help="Path to Sentinel-2 SAFE directory")
+    parser.add_argument("--lat", type=float, required=True, help="Centre latitude")
+    parser.add_argument("--lon", type=float, required=True, help="Centre longitude")
     parser.add_argument("--output", type=str, default=None, help="Output directory")
-    parser.add_argument(
-        "--use-satpy", action="store_true", help="Use Satpy instead of rasterio"
-    )
+    parser.add_argument("--use-satpy", action="store_true",
+                        help="Use Satpy instead of rasterio")
 
     args = parser.parse_args()
+    output_dir = Path(args.output) if args.output else config.PROCESSED_DATA_DIR
 
-    # Set up output directory
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        output_dir = config.PROCESSED_DATA_DIR
-
-    # Initialize processor
-    scene_path = Path(args.scene)
-    processor = NDVIProcessor(scene_path)
-
-    # Process
+    processor = NDVIProcessor(Path(args.scene))
     results = processor.process(
-        lat=args.lat,
-        lon=args.lon,
-        output_dir=output_dir,
-        use_satpy=args.use_satpy,
+        lat=args.lat, lon=args.lon,
+        output_dir=output_dir, use_satpy=args.use_satpy,
     )
 
-    # Display results
     logger.info("\n" + "=" * 60)
     logger.info("NDVI PROCESSING RESULTS")
     logger.info("=" * 60)
     logger.info(f"Scene: {results['scene_id']}")
     logger.info(f"NDVI Mean: {results['statistics']['mean']:.3f}")
-    logger.info(f"NDVI Std: {results['statistics']['std']:.3f}")
-    logger.info(f"NDVI Min: {results['statistics']['min']:.3f}")
-    logger.info(f"NDVI Max: {results['statistics']['max']:.3f}")
-    logger.info(f"GeoTIFF: {results['geotiff_path']}")
-    logger.info(f"Visualization: {results['visualization_path']}")
+    logger.info(f"NDVI Std:  {results['statistics']['std']:.3f}")
+    logger.info(f"GeoTIFF:   {results['geotiff_path']}")
     logger.info("=" * 60)
 
 
