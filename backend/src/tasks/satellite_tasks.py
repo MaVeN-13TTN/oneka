@@ -195,8 +195,11 @@ def analyse_project_task(
         div_service = DivergenceService(db)
         divergence_result = div_service.calculate_divergence(uuid_obj)
 
-        # ── Risk scoring (Phase 4 placeholder) ──────────────────────────
-        score_project_risk_task.delay(project_uuid)
+        # ── Risk scoring — enqueue Phase 4 ML task ──────────────────────
+        celery_app.send_task(
+            "src.tasks.ml_tasks.score_project_risk_task",
+            args=[project_uuid],
+        )
 
         summary = {
             "project_uuid": project_uuid,
@@ -281,16 +284,18 @@ def batch_analyse_flagged_projects_task(self) -> dict:
 )
 def score_project_risk_task(self, project_uuid: str) -> dict:
     """
-    Phase 4 placeholder — ML risk scoring.
+    Phase 4 — ML risk scoring via RiskScoringService.
 
-    For Phase 3, maps the divergence alert level directly to RiskLevel.
-    Phase 4 will replace this with an actual RandomForest/XGBoost inference call.
+    Attempts to score the project using the trained RandomForest model.
+    Falls back gracefully to the divergence-based risk_level (Phase 3 behaviour)
+    when the model pkl is not yet present on disk.
 
     Args:
         project_uuid: String UUID of the project to score.
 
     Returns:
-        Dict: {project_uuid, risk_level, risk_score}.
+        Dict: {project_uuid, ghost_probability, risk_level,
+               model_version, model_available}.
     """
     db = SessionLocal()
     try:
@@ -299,12 +304,29 @@ def score_project_risk_task(self, project_uuid: str) -> dict:
         if not project:
             return {"project_uuid": project_uuid, "error": "not found"}
 
-        # Risk level set by DivergenceService — return current state
-        result = {
-            "project_uuid": project_uuid,
-            "risk_level": project.risk_level.value if project.risk_level else None,
-            "risk_score": project.risk_score,
-        }
+        try:
+            from src.services.risk_scoring_service import RiskScoringService
+
+            svc = RiskScoringService()
+            score = svc.score_project(uuid_obj, db)
+            result = {
+                "project_uuid": project_uuid,
+                "ghost_probability": score.ghost_probability,
+                "risk_level": score.risk_level,
+                "model_version": score.model_version,
+                "model_available": score.model_available,
+            }
+        except FileNotFoundError:
+            # Model not trained yet — return Phase 3 divergence-based state
+            result = {
+                "project_uuid": project_uuid,
+                "ghost_probability": None,
+                "risk_level": project.risk_level.value if project.risk_level else None,
+                "risk_score": project.risk_score,
+                "model_version": "not_trained",
+                "model_available": False,
+            }
+
         logger.info("score_project_risk_task complete: %s", result)
         return result
     except Exception as exc:

@@ -22,6 +22,7 @@ def create_celery_app() -> Celery:
         include=[
             "src.tasks.ingestion_tasks",
             "src.tasks.satellite_tasks",
+            "src.tasks.ml_tasks",         # Phase 4 — ML risk scoring
         ],
     )
 
@@ -50,6 +51,11 @@ def create_celery_app() -> Celery:
             "refresh-kmhfl-monthly": {
                 "task": "src.tasks.ingestion_tasks.refresh_kmhfl_task",
                 "schedule": crontab(hour=3, minute=0, day_of_week=0),
+            },
+            # ML batch re-scoring — every Sunday at 04:00 EAT
+            "batch-score-weekly": {
+                "task": "src.tasks.ml_tasks.batch_score_task",
+                "schedule": crontab(hour=4, minute=0, day_of_week=0),
             },
         },
     )

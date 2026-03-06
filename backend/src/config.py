@@ -2,8 +2,12 @@
 Application configuration and settings management using Pydantic.
 """
 
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+# Absolute path to repo root (backend/src/config.py → parents[2] = oneka/)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -47,6 +51,11 @@ class Settings(BaseSettings):
     # Data Sources
     ppip_base_url: str = "https://tenders.go.ke"
     kmhfl_api_url: str = "https://api.kmhfr.health.go.ke/api"
+
+    # ML Model (Phase 4)
+    # Default resolves to satellite/models/ghost_detector_v1.pkl from repo root.
+    # Override via ML_MODEL_PATH env var if the model is stored elsewhere.
+    ml_model_path: str = str(_REPO_ROOT / "satellite" / "models" / "ghost_detector_v1.pkl")
 
     # Logging
     log_level: str = "INFO"
