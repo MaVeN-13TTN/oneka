@@ -38,6 +38,10 @@ python-multipart==0.0.6
 email-validator==2.1.0
 rapidfuzz==3.6.1
 
+# NLP — spaCy for Tier 2 geolocation NER
+# After installing: python -m spacy download en_core_web_sm
+spacy>=3.7.0,<4.0.0
+
 # Development Dependencies
 pytest==7.4.4
 pytest-cov==4.1.0
