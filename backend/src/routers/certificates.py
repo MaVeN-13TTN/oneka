@@ -10,18 +10,17 @@ Endpoints:
       Check whether a certificate can be generated (satellite data exists).
 """
 
-from __future__ import annotations
-
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from src.database import get_db
 from src.models.project import Project
 from src.models.satellite import SatelliteAnalysis
+from src.rate_limit import limiter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -41,7 +40,9 @@ logger = logging.getLogger(__name__)
         422: {"description": "No satellite analyses for project"},
     },
 )
+@limiter.limit("10/minute")
 async def generate_certificate(
+    request: Request,
     project_uuid: UUID,
     analyst_name: str = Query(
         ..., min_length=2, max_length=200,

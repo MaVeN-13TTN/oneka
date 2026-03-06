@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "ONEKA AI API"
-    debug: bool = True
+    debug: bool = False
     environment: str = "development"
     api_version: str = "1.0.0"
 

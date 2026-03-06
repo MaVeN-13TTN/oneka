@@ -5,8 +5,13 @@ FastAPI application entry point.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from src.config import settings
+from src.middleware.security_headers import SecurityHeadersMiddleware
+from src.rate_limit import limiter
 from src.routers import health, procurement, projects, financial, geolocation, satellite, risk, maps, certificates
 
 # Create FastAPI application
@@ -19,17 +24,24 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
+# Rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+# Security headers
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Configure CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # Next.js dev server
-        "http://localhost:8000",  # Backend dev server
         "https://oneka.ai",  # Production frontend
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
 

@@ -9,14 +9,16 @@ GET  /api/v1/projects/{uuid}/truth-record — unified project card
 """
 
 import logging
+import re
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from src.database import get_db
 from src.models.project import Project, RiskLevel
+from src.rate_limit import limiter
 from src.schemas.projects import (
     ProjectListResponse,
     ProjectResponse,
@@ -27,6 +29,13 @@ from src.services.concordance_service import ConcordanceService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_input(value: str, max_length: int = 200) -> str:
+    """Strip control chars, collapse whitespace, limit length."""
+    cleaned = re.sub(r'[\x00-\x1f\x7f]', '', value)
+    cleaned = ' '.join(cleaned.split())
+    return cleaned[:max_length]
 
 
 @router.get(
@@ -63,14 +72,17 @@ async def list_projects(
                        f"Valid: LOW, MEDIUM, HIGH, CRITICAL",
             )
     if county:
+        county = _sanitize_input(county, max_length=100)
         query = query.filter(
             Project.county.ilike(f"%{county}%")
         )
     if project_type:
+        project_type = _sanitize_input(project_type, max_length=100)
         query = query.filter(
             Project.project_type.cast(str).ilike(f"%{project_type}%")
         )
     if status_filter:
+        status_filter = _sanitize_input(status_filter, max_length=50)
         query = query.filter(
             Project.status.cast(str).ilike(f"%{status_filter}%")
         )
@@ -170,7 +182,8 @@ async def projects_geojson(
         "project_uuid.  Creates new Project rows where no fuzzy match exists."
     ),
 )
-async def reconcile_projects(db: Session = Depends(get_db)):
+@limiter.limit("3/minute")
+async def reconcile_projects(request: Request, db: Session = Depends(get_db)):
     """Trigger concordance for all unlinked procurement records."""
     try:
         service = ConcordanceService(db)
