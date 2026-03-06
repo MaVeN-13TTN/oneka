@@ -103,6 +103,19 @@ class SatelliteAnalysis(Base, TimestampMixin):
         DECIMAL(8, 4), nullable=True, comment="Mean VH backscatter (dB)"
     )
 
+    # Derived temporal metrics (Phase 3)
+    ndvi_slope = Column(
+        DECIMAL(8, 4),
+        nullable=True,
+        comment="Linear regression slope of ndvi_mean over time (NDVI/month); negative = land clearing",
+    )
+
+    sar_backscatter_delta = Column(
+        DECIMAL(8, 4),
+        nullable=True,
+        comment="SAR VV backscatter delta vs baseline (dB); positive = new structures appearing",
+    )
+
     # Interpretation
     interpretation = Column(
         Text, nullable=True, comment="Human-readable interpretation of analysis"

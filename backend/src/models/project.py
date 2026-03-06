@@ -2,7 +2,7 @@
 Project model - Master registry for all infrastructure projects.
 """
 
-from sqlalchemy import Column, String, Integer, DECIMAL, Enum
+from sqlalchemy import Column, String, Integer, DECIMAL, Enum, Numeric
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import uuid
@@ -107,6 +107,13 @@ class Project(Base, TimestampMixin):
     # Data Quality
     confidence_score = Column(
         Integer, nullable=True, comment="Data quality/completeness score 0-100"
+    )
+
+    # ML Predictions (Phase 4+)
+    ghost_probability = Column(
+        Numeric(5, 4),
+        nullable=True,
+        comment="ML-predicted ghost project probability 0.0000–1.0000; reserved for Phase 4",
     )
 
     geolocation_status = Column(
