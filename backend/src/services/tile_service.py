@@ -168,7 +168,7 @@ class TileService:
             project_uuid: Project UUID
             layer: Layer type ('ndvi', 'sar', etc.)
             z_range: (min_zoom, max_zoom) tuple, default (8, 14)
-            expiration: URL expiration time in seconds (default: 3600 = 1 hour)
+            expiration: URL expiration time in seconds (default: 3600 = 1 hour, max: 3600)
 
         Returns:
             List of presigned S3 URLs
@@ -176,6 +176,9 @@ class TileService:
         Raises:
             ValueError: If tiles not found for project
         """
+        # Hard cap: never exceed 60 minutes
+        expiration = min(expiration, 3600)
+
         # Fetch latest satellite analysis
         analysis = (
             self.db.query(SatelliteAnalysis)

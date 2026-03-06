@@ -20,12 +20,13 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 import httpx
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from src.database import get_db
 from src.config import settings
+from src.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,8 @@ def _is_token_valid(token_hash: str) -> bool:
 
 
 @router.post("/maps/tiles/session", tags=["Maps"])
-async def create_session(db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def create_session(request: Request, db: Session = Depends(get_db)):
     """
     Create a Google Maps Tiles API session token.
 
@@ -158,7 +160,8 @@ async def create_session(db: Session = Depends(get_db)):
 
 
 @router.get("/maps/tiles/{session_token}/{z}/{x}/{y}", tags=["Maps"])
-async def proxy_tile(session_token: str, z: int, x: int, y: int):
+@limiter.limit("60/minute")
+async def proxy_tile(request: Request, session_token: str, z: int, x: int, y: int):
     """
     Proxy tile request to Google Maps Tiles API.
 
@@ -257,6 +260,9 @@ async def proxy_tile(session_token: str, z: int, x: int, y: int):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to fetch tile from Google Maps",
         )
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception(f"Unexpected error proxying tile z{z}/x{x}/y{y}: {e}")

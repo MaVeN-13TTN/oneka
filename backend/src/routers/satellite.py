@@ -11,11 +11,12 @@ GET  /api/v1/dashboard/heat-map                  — all projects for heat-map
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from src.database import get_db
 from src.models.project import Project
+from src.rate_limit import limiter
 from src.services.satellite_service import SatelliteService
 from src.services.divergence_service import DivergenceService
 
@@ -33,8 +34,9 @@ logger = logging.getLogger(__name__)
         "scenes for the project.  The project must already have a GeolocationRecord."
     ),
 )
+@limiter.limit("10/minute")
 async def queue_satellite_analysis(
-    project_uuid: UUID, db: Session = Depends(get_db)
+    request: Request, project_uuid: UUID, db: Session = Depends(get_db)
 ):
     """Queue analyse_project_task for a single project."""
     service = SatelliteService(db)
@@ -109,6 +111,18 @@ async def get_ndvi_tile(
     from src.services.tile_service import TileService
     from src.models.geolocation import GeolocationRecord
     from fastapi.responses import RedirectResponse, JSONResponse
+
+    # Validate zoom and coordinates
+    if not (0 <= z <= 28):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid zoom level: {z} (must be 0-28)",
+        )
+    if not (0 <= x < (2 ** z) and 0 <= y < (2 ** z)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tile out of bounds at z{z}/x{x}/y{y}",
+        )
 
     try:
         service = TileService(db)

@@ -231,11 +231,14 @@ class S3StorageService:
 
         Args:
             s3_key: S3 object key
-            expiration: URL expiration time in seconds (default: 1 hour)
+            expiration: URL expiration time in seconds (default: 1 hour, max: 1 hour)
 
         Returns:
             Presigned URL or None if failed
         """
+        # Hard cap: never exceed 60 minutes regardless of caller request
+        expiration = min(expiration, 3600)
+
         if not self.s3_client:
             logger.error("S3 client not initialized.")
             return None

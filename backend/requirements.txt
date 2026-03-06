@@ -50,6 +50,9 @@ pandas==2.1.4
 # PDF Certificate Generation (Phase 6) — Section 106B legal certificates
 weasyprint>=61.0
 
+# API Hardening (Phase 7) — rate limiting
+slowapi==0.1.9
+
 # Development Dependencies
 pytest==7.4.4
 pytest-cov==4.1.0
