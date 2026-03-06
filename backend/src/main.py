@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.config import settings
-from src.routers import health, procurement, projects, financial, geolocation
+from src.routers import health, procurement, projects, financial, geolocation, satellite
 
 # Create FastAPI application
 app = FastAPI(
@@ -59,6 +59,7 @@ app.include_router(procurement.router, prefix="/api/v1", tags=["Procurement"])
 app.include_router(projects.router, prefix="/api/v1", tags=["Projects"])
 app.include_router(financial.router, prefix="/api/v1", tags=["Financial"])
 app.include_router(geolocation.router, prefix="/api/v1", tags=["Geolocation"])
+app.include_router(satellite.router, prefix="/api/v1", tags=["Satellite"])
 
 
 # Global exception handler
