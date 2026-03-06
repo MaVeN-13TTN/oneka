@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # Override via ML_MODEL_PATH env var if the model is stored elsewhere.
     ml_model_path: str = str(_REPO_ROOT / "satellite" / "models" / "ghost_detector_v1.pkl")
 
+    # Phase 5 — Tiles & Google Maps
+    tile_s3_prefix: str = "tiles"
+    tile_generation_timeout: int = 600  # seconds
+    tile_cache_ttl: int = 604800  # 7 days in seconds
+    redis_tile_cache_enabled: bool = True
+
     # Logging
     log_level: str = "INFO"
 
