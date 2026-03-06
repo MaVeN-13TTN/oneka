@@ -19,6 +19,7 @@ from src.models import (
     GeolocationRecord,
     FinancialRecord,
     SatelliteAnalysis,
+    AdminBoundary,  # noqa: F401 — ensures admin_boundaries is in target_metadata
 )
 
 # this is the Alembic Config object, which provides
