@@ -91,23 +91,121 @@ async def get_task_status(task_id: str):
     "/satellite/tiles/{project_uuid}/ndvi/{z}/{x}/{y}",
     summary="NDVI tile (Phase 5)",
     description=(
-        "Returns a 256×256 PNG map tile for the given XYZ coordinates.  "
-        "Full COG tile generation is deferred to Phase 5.  "
-        "This endpoint returns 501 for now."
+        "Returns a 256×256 PNG map tile for the given XYZ coordinates, "
+        "or triggers tile generation if not yet available.  "
+        "Returns 307 redirect to presigned S3 URL if tiles are ready, "
+        "or 202 Accepted if tile generation is in progress."
     ),
 )
 async def get_ndvi_tile(
     project_uuid: UUID, z: int, x: int, y: int, db: Session = Depends(get_db)
 ):
-    """Tile endpoint placeholder — Phase 5 COG tile generation not yet implemented."""
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail=(
-            "NDVI tile generation (COG/cogeo-mosaic) is a Phase 5 feature.  "
-            "Use the image_url field from /satellite/time-series for direct "
-            "GeoTIFF access."
-        ),
-    )
+    """
+    Return NDVI XYZ tile for project.
+
+    If tiles already generated: 307 redirect to presigned S3 URL
+    If tiles missing: 202 Accepted + trigger generation + return task_id
+    """
+    from src.services.tile_service import TileService
+    from src.models.geolocation import GeolocationRecord
+    from fastapi.responses import RedirectResponse, JSONResponse
+
+    try:
+        service = TileService(db)
+        tile_status = service.get_tile_status(project_uuid)
+
+        if tile_status["status"] == "complete" and tile_status["tile_url_template"]:
+            # Tiles already generated; redirect to presigned S3 URL
+            s3_prefix = tile_status["tile_url_template"].split("?")[0]  # Remove query params
+            tile_url = (
+                s3_prefix.replace("{z}", str(z))
+                .replace("{x}", str(x))
+                .replace("{y}", str(y))
+            )
+
+            # Generate presigned URL
+            urls = service.get_tile_presigned_urls(project_uuid, "ndvi", z_range=(z, z))
+            if urls:
+                return RedirectResponse(url=urls[0], status_code=307)
+
+            # Fallback: return tile_url as-is
+            return RedirectResponse(url=tile_url, status_code=307)
+
+        # Tiles not yet generated; trigger generation
+        try:
+            task_id = service.queue_tile_generation(project_uuid, "ndvi")
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "queued",
+                    "task_id": task_id,
+                    "message": f"Tile generation queued; task_id={task_id}",
+                },
+                headers={"X-Task-ID": task_id},
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc),
+            )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("get_ndvi_tile failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch tile",
+        )
+
+
+@router.get(
+    "/satellite/tiles-status/{project_uuid}",
+    summary="Tile generation status",
+    description=(
+        "Get tile generation status for a project. "
+        "Returns status and presigned URLs if tiles are complete."
+    ),
+)
+async def get_tiles_status(
+    project_uuid: UUID, db: Session = Depends(get_db)
+):
+    """
+    Return tile generation status and presigned URLs.
+
+    Returns:
+        {
+            'status': 'complete'|'pending'|'generating'|'failed',
+            'tile_url_template': '...' or null,
+            'presigned_urls': [...] or null,
+            'error': null or message
+        }
+    """
+    from src.services.tile_service import TileService
+
+    try:
+        service = TileService(db)
+        status_dict = service.get_tile_status(project_uuid)
+
+        if status_dict["status"] == "complete":
+            try:
+                urls = service.get_tile_presigned_urls(
+                    project_uuid, "ndvi", z_range=(8, 14)
+                )
+                status_dict["presigned_urls"] = urls
+            except ValueError:
+                logger.warning(
+                    f"Could not generate presigned URLs for {project_uuid}"
+                )
+
+        return status_dict
+
+    except Exception as exc:
+        logger.error("get_tiles_status failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve tile status",
+        )
 
 
 # ─── divergence ───────────────────────────────────────────────────────────────

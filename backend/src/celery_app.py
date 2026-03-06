@@ -23,6 +23,7 @@ def create_celery_app() -> Celery:
             "src.tasks.ingestion_tasks",
             "src.tasks.satellite_tasks",
             "src.tasks.ml_tasks",         # Phase 4 — ML risk scoring
+            "src.tasks.tile_tasks",       # Phase 5 — XYZ tile generation
         ],
     )
 

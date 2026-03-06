@@ -90,21 +90,37 @@ async def list_projects(
 @router.get(
     "/projects/geojson",
     summary="Projects as GeoJSON",
-    description="GeoJSON FeatureCollection of all geolocated projects.",
+    description="GeoJSON FeatureCollection of all geolocated projects with optional risk_level filter.",
 )
-async def projects_geojson(db: Session = Depends(get_db)):
+async def projects_geojson(
+    risk_level: Optional[str] = Query(
+        None,
+        description="Comma-separated: LOW,MEDIUM,HIGH,CRITICAL (e.g. ?risk_level=HIGH,CRITICAL)"
+    ),
+    db: Session = Depends(get_db)
+):
     """Return a GeoJSON FeatureCollection of all geolocated projects."""
     from src.models.geolocation import GeolocationRecord
 
-    rows = (
+    query = (
         db.query(Project, GeolocationRecord)
         .join(
             GeolocationRecord,
             GeolocationRecord.project_uuid == Project.project_uuid,
         )
         .filter(Project.geolocation_status == "geolocated")
-        .all()
     )
+
+    # Apply risk_level filter if provided
+    if risk_level:
+        requested = {r.strip().upper() for r in risk_level.split(",")}
+        valid_levels = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+        filtered = requested & valid_levels
+        if filtered:
+            enums = [RiskLevel[lv] for lv in filtered]
+            query = query.filter(Project.risk_level.in_(enums))
+
+    rows = query.all()
 
     features = []
     seen: set = set()
@@ -126,6 +142,11 @@ async def projects_geojson(db: Session = Depends(get_db)):
                     "county": proj.county,
                     "status": proj.status.value,
                     "risk_level": proj.risk_level.value if proj.risk_level else None,
+                    "ghost_probability": (
+                        float(proj.ghost_probability)
+                        if proj.ghost_probability is not None
+                        else None
+                    ),
                     "estimated_value_kes": (
                         float(proj.estimated_value_kes)
                         if proj.estimated_value_kes
