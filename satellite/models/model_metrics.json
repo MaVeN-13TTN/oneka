@@ -1,0 +1,15 @@
+{
+  "model_version": "v1",
+  "n_samples": 30,
+  "n_ghost": 10,
+  "n_success": 20,
+  "cv_folds": 5,
+  "smote_applied": true,
+  "cv_auc": 0.5625,
+  "cv_precision_ghost": 0.3667,
+  "cv_recall_ghost": 0.4,
+  "cv_f1_ghost": 0.3467,
+  "target_auc_met": false,
+  "target_precision_met": false,
+  "target_recall_met": false
+}

@@ -42,6 +42,11 @@ rapidfuzz==3.6.1
 # After installing: python -m spacy download en_core_web_sm
 spacy>=3.7.0,<4.0.0
 
+# ML Inference (Phase 4) — load trained RandomForest, extract features, score projects
+scikit-learn==1.4.0
+joblib==1.3.2
+pandas==2.1.4
+
 # Development Dependencies
 pytest==7.4.4
 pytest-cov==4.1.0
