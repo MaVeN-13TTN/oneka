@@ -169,11 +169,18 @@ celery -A src.celery_app beat --loglevel=info
 | `refresh-kmhfl-monthly` | 1st Sunday monthly at 03:00 EAT | Refresh health facility registry cache |
 | `batch-score-weekly` | Sundays at 04:00 EAT | Re-score all active projects with ML model |
 
+**On-demand tasks (triggered via API):**
+| Task | Trigger endpoint | Description |
+|---|---|---|
+| `ingest_cob_report_task` | `POST /api/v1/financial/ingest-cob` | Parse COB BIRR PDF (standard) |
+| `ingest_cob_report_intelligent_task` | `POST /api/v1/financial/ingest-cob-intelligent` | Parse COB BIRR PDF with GPT-4o Vision |
+| `investigate_project_task` | `POST /api/v1/investigations/{id}/scrape` | Run full 7-stage investigation pipeline |
+
 ---
 
 ## 5. Running Tests
 
-### Backend Tests (281 tests — requires PostgreSQL)
+### Backend Tests (334 tests — requires PostgreSQL)
 
 ```bash
 cd backend
@@ -188,6 +195,9 @@ source venv-backend/bin/activate
 # Run specific test file
 ./venv-backend/bin/pytest tests/test_phase4.py -v
 
+# Run investigation tests only
+./venv-backend/bin/pytest tests/test_investigations.py -v
+
 # Run tests by marker
 ./venv-backend/bin/pytest tests/ -m "unit" -v
 
@@ -195,20 +205,26 @@ source venv-backend/bin/activate
 ./venv-backend/bin/pytest tests/ --cov=src --cov-report=term-missing
 ```
 
-**Current test status:** 281 passed, 1 skipped, 80% coverage
+**Current test status:** 334 passed, 1 skipped, 82% coverage
 
-### Data Acquisition Tests (45 tests — fully isolated)
+### Data Acquisition Tests (116 tests — fully isolated)
 
 ```bash
 cd data
 
 # Run full test suite (no database, network, or Playwright required)
 venv-data/bin/python -m pytest tests/ -v --tb=short
+
+# Run targeted scraper tests only
+venv-data/bin/python -m pytest tests/test_targeted_scrapers.py -v
+
+# Run IntelligentCoBParser tests only (requires poppler-utils)
+venv-data/bin/python -m pytest tests/test_intelligent_cob.py -v
 ```
 
-**Current test status:** 45 passed
+**Current test status:** 116 passed
 
-Tests cover: BaseScraper orchestration, CoBParser PDF table extraction, SQLAlchemy Core table definitions, scraper data transformations (EGP GPS, PPIP dates, NCA IDs, KMHFL cache, COB poller).
+Tests cover: BaseScraper orchestration, CoBParser PDF table extraction, SQLAlchemy Core table definitions, scraper data transformations (EGP GPS, PPIP dates, NCA IDs, KMHFL cache, COB poller), targeted scraper context injection (`ctx` param), IntelligentCoBParser (pdf2image + GPT-4o Vision, cost guardrail, fallback logic).
 
 ### Satellite Tests (122 tests — fully isolated)
 
@@ -226,22 +242,84 @@ Tests cover: FeatureEngineer (48 tests), Config class (15 tests), utility functi
 ### Run All Tests
 
 ```bash
-# From the project root — run all 448 tests across all modules
+# From the project root — run all 572 tests across all modules
 cd backend  && ./venv-backend/bin/pytest tests/ -v --tb=short && cd ..
 cd data     && venv-data/bin/python -m pytest tests/ -v --tb=short && cd ..
 cd satellite && venv-satellite/bin/python -m pytest tests/ -v --tb=short && cd ..
 ```
 
-| Module | Tests | Isolation | Requirements |
-|--------|-------|-----------|--------------|
-| `backend/tests/` | 281 | Integration | PostgreSQL + Redis |
-| `data/tests/` | 45 | Fully isolated | None (mocks only) |
-| `satellite/tests/` | 122 | Fully isolated | None (pure computation) |
-| **Total** | **448** | | |
+| Module             | Tests   | Isolation      | Requirements            |
+| ------------------ | ------- | -------------- | ----------------------- |
+| `backend/tests/`   | 334     | Integration    | PostgreSQL + Redis      |
+| `data/tests/`      | 116     | Fully isolated | None (mocks only)       |
+| `satellite/tests/` | 122     | Fully isolated | None (pure computation) |
+| **Total**          | **572** |                |                         |
 
 ---
 
-## 6. Satellite Module Setup
+## 6. Single-Project Investigation Workflow
+
+The investigation pipeline allows you to trigger a deep-dive audit on a single named project. It runs 7 pipeline stages using targeted scrapers plus optional Perplexity AI enrichment.
+
+### Prerequisites
+
+Ensure the backend and Celery worker are running (§4), and that `PERPLEXITY_API_KEY` and `OPENAI_API_KEY` are set in `backend/.env`.
+
+### Step-by-step
+
+```bash
+BASE=http://localhost:8000/api/v1
+
+# 1. Create an investigation
+curl -s -X POST "$BASE/investigations" \
+  -H "Content-Type: application/json" \
+  -d '{"project_name": "Garissa County Headquarters"}' | jq .
+
+# Response includes the investigation UUID, e.g.:
+# { "id": "abc123", "status": "CREATED", ... }
+
+ID=abc123   # replace with your UUID
+
+# 2a. Enrich via Perplexity AI (recommended — populates project context automatically)
+curl -s -X POST "$BASE/investigations/$ID/enrich" | jq .
+
+# 2b. OR manually provide context (fallback when Perplexity is unavailable)
+curl -s -X PATCH "$BASE/investigations/$ID/context" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "county": "Garissa",
+    "project_type": "office",
+    "contractor": "ABC Construction Ltd",
+    "value_kes": 150000000,
+    "ward": "Garissa Township"
+  }' | jq .
+
+# 3. Trigger the full 7-stage pipeline
+curl -s -X POST "$BASE/investigations/$ID/scrape" | jq .
+# Status transitions: ENRICHED → SCRAPING → SCORING → COMPLETE
+
+# 4. Poll status until COMPLETE (or FAILED)
+curl -s "$BASE/investigations/$ID/status" | jq '{status, current_stage, stages_completed}'
+
+# 5. Fetch the full investigation report
+curl -s "$BASE/investigations/$ID/report" | jq .
+```
+
+### Pipeline stages
+
+| Stage | Name          | What it does                                         |
+| ----- | ------------- | ---------------------------------------------------- |
+| 1     | Procurement   | Targeted e-GP + PPIP scrape for matching tenders     |
+| 2     | Geolocation   | Three-tier GPS resolution                            |
+| 3     | NCA Registry  | National Construction Authority contractor lookup    |
+| 4     | KMHFL Check   | Health facility classification (for health projects) |
+| 5     | CoB Financial | Budget absorption from CoB BIRR reports              |
+| 6     | Satellite     | NDVI/SAR divergence score                            |
+| 7     | ML Risk Score | Ghost probability + risk classification              |
+
+---
+
+## 7. Satellite Module Setup
 
 ```bash
 cd satellite
@@ -280,7 +358,7 @@ Output: `models/ghost_detector_v1.pkl` + metrics + plots
 
 ---
 
-## 7. Full Stack with Docker Compose
+## 8. Full Stack with Docker Compose
 
 To run everything containerized:
 
@@ -306,7 +384,7 @@ docker-compose down
 
 ---
 
-## 8. API Endpoints Reference
+## 9. API Endpoints Reference
 
 ### Core Endpoints
 
@@ -326,6 +404,17 @@ docker-compose down
 | GET    | `/api/v1/projects/{uuid}`              | Single project                                                  |
 | GET    | `/api/v1/projects/{uuid}/truth-record` | Unified project card with all linked data                       |
 | POST   | `/api/v1/projects/reconcile`           | Batch concordance for unlinked records (3/min)                  |
+
+### Investigations
+
+| Method | Path                                  | Description                                        |
+| ------ | ------------------------------------- | -------------------------------------------------- |
+| POST   | `/api/v1/investigations`              | Create investigation for a named project (20/hour) |
+| POST   | `/api/v1/investigations/{id}/enrich`  | Perplexity AI enrichment pass                      |
+| PATCH  | `/api/v1/investigations/{id}/context` | Manual context override / fallback                 |
+| POST   | `/api/v1/investigations/{id}/scrape`  | Trigger full 7-stage pipeline (10/hour)            |
+| GET    | `/api/v1/investigations/{id}/status`  | Poll stage progress + status                       |
+| GET    | `/api/v1/investigations/{id}/report`  | Full investigation report with all stage outputs   |
 
 ### Procurement
 
@@ -388,7 +477,7 @@ docker-compose down
 
 ---
 
-## 9. Rate Limits
+## 10. Rate Limits
 
 All rate limits use `slowapi` with per-IP tracking:
 
@@ -400,12 +489,14 @@ All rate limits use `slowapi` with per-IP tracking:
 | `POST /satellite/analyse/{uuid}`      | 10/minute  |
 | `POST /projects/reconcile`            | 3/minute   |
 | `GET /certificates/{uuid}`            | 10/minute  |
+| `POST /investigations`                | 20/hour    |
+| `POST /investigations/{id}/scrape`    | 10/hour    |
 
 Exceeding the limit returns `429 Too Many Requests`.
 
 ---
 
-## 10. Security Headers
+## 11. Security Headers
 
 All responses include:
 
