@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from src.config import settings
 from src.middleware.security_headers import SecurityHeadersMiddleware
 from src.rate_limit import limiter
-from src.routers import health, procurement, projects, financial, geolocation, satellite, risk, maps, certificates
+from src.routers import health, procurement, projects, financial, geolocation, satellite, risk, maps, certificates, investigations
 
 # Create FastAPI application
 app = FastAPI(
@@ -86,6 +86,7 @@ app.include_router(satellite.router, prefix="/api/v1", tags=["Satellite"])
 app.include_router(risk.router, prefix="/api/v1", tags=["Risk Scoring"])
 app.include_router(maps.router, prefix="/api/v1", tags=["Maps"])
 app.include_router(certificates.router, prefix="/api/v1", tags=["Certificates"])
+app.include_router(investigations.router, prefix="/api/v1", tags=["Investigations"])
 
 
 # Global exception handler
