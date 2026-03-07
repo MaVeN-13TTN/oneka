@@ -25,6 +25,13 @@ playwright==1.41.2
 # ============================================================================
 
 pdfplumber==0.10.3
+pdf2image==1.17.0   # page rendering for Vision extraction (requires poppler)
+
+# ============================================================================
+# AI / LLM clients
+# ============================================================================
+
+openai==1.65.0      # GPT-4o Vision extraction (IntelligentCoBParser)
 
 # ============================================================================
 # Database (async SQLAlchemy — shares schema with backend/)

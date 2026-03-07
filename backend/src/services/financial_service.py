@@ -2,10 +2,11 @@
 Financial Service - COB BIRR PDF ingestion and absorption gap analysis.
 """
 
+import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -97,6 +98,100 @@ class FinancialService:
 
         self.db.commit()
         logger.info(f"FinancialService: inserted {count} records from {pdf_path}")
+        return count
+
+    def ingest_cob_report_intelligent(
+        self,
+        pdf_path: str,
+        ctx: Any,
+        openai_api_key: str,
+        model: str = "gpt-4o",
+        max_pages: int = 20,
+        dpi: int = 200,
+        cost_limit_usd: Optional[float] = None,
+    ) -> int:
+        """
+        Intelligent two-stage COB BIRR ingestion using GPT-4o Vision.
+
+        Stage 1: pdfplumber keyword scan (free, fast).
+        Stage 2: GPT-4o Vision extraction on candidate pages (targeted).
+
+        Args:
+            pdf_path:       Path to the COB BIRR PDF.
+            ctx:            ProjectContext (data.context.ProjectContext or any
+                            object with canonical_name, aliases, fiscal_years,
+                            procuring_entity, ministry, county, vote_head attrs).
+            openai_api_key: OpenAI API key.
+            model:          Vision model to use (default: "gpt-4o").
+            max_pages:      Maximum number of candidate pages to send to Vision.
+            dpi:            Page render DPI (default: 200).
+            cost_limit_usd: Cap on OpenAI Vision spend for this call (USD).
+                            Defaults to None (uncapped); wire from
+                            settings.vision_cost_limit_usd in callers.
+
+        Returns:
+            Number of new FinancialRecord rows inserted.
+        """
+        try:
+            from openai import AsyncOpenAI
+            from data.parsers.intelligent_cob import IntelligentCoBParser
+        except ImportError as exc:
+            logger.error(
+                f"IntelligentCoBParser not importable: {exc} — "
+                "ensure data/ is on sys.path and openai/pdf2image are installed."
+            )
+            return 0
+
+        client = AsyncOpenAI(api_key=openai_api_key)
+        parser = IntelligentCoBParser(
+            pdf_path=pdf_path,
+            ctx=ctx,
+            openai_client=client,
+            max_vision_pages=max_pages,
+            dpi=dpi,
+            cost_limit_usd=cost_limit_usd,
+        )
+        # Bridge async parser into this synchronous service method.
+        raw_records = asyncio.run(parser.extract())
+
+        count = 0
+        for rec in raw_records:
+            # Skip duplicates by document_source + fiscal_year + programme
+            existing = (
+                self.db.query(FinancialRecord)
+                .filter(
+                    FinancialRecord.document_source == rec.get("document_source"),
+                    FinancialRecord.fiscal_year == rec.get("fiscal_year"),
+                    FinancialRecord.programme == rec.get("programme"),
+                )
+                .first()
+            )
+            if existing:
+                continue
+
+            financial = FinancialRecord(
+                source_system=rec.get("source_system", "COB"),
+                fiscal_year=rec.get("fiscal_year"),
+                vote_head=rec.get("vote_head"),
+                ministry=rec.get("ministry"),
+                programme=rec.get("programme"),
+                budget_allocated_kes=rec.get("budget_allocated_kes"),
+                budget_released_kes=rec.get("budget_released_kes"),
+                budget_absorbed_kes=rec.get("budget_absorbed_kes"),
+                absorption_rate=rec.get("absorption_rate"),
+                reporting_period=rec.get("reporting_period"),
+                document_source=rec.get("document_source"),
+                match_method=rec.get("match_method"),
+                confidence_score=rec.get("confidence_score"),
+            )
+            self.db.add(financial)
+            count += 1
+
+        self.db.commit()
+        logger.info(
+            f"FinancialService: intelligent ingest inserted {count} records "
+            f"from {pdf_path} (vision_cost=${parser.total_cost_usd:.4f})"
+        )
         return count
 
     # ── queries ───────────────────────────────────────────────────────────
