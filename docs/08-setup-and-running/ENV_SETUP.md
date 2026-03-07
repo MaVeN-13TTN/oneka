@@ -4,10 +4,10 @@ This guide walks you through obtaining every credential and configuring both `.e
 
 ONEKA uses two separate `.env` files:
 
-| File | Module | Config Loader |
-|------|--------|---------------|
-| `backend/.env` | FastAPI web API, Celery workers | Pydantic `BaseSettings` (automatic) |
-| `satellite/.env` | Satellite processing pipeline | `python-dotenv` + `os.getenv()` (manual) |
+| File             | Module                          | Config Loader                            |
+| ---------------- | ------------------------------- | ---------------------------------------- |
+| `backend/.env`   | FastAPI web API, Celery workers | Pydantic `BaseSettings` (automatic)      |
+| `satellite/.env` | Satellite processing pipeline   | `python-dotenv` + `os.getenv()` (manual) |
 
 Both files are git-ignored. Copy the `.env.example` templates to get started:
 
@@ -25,9 +25,11 @@ cp satellite/.env.example satellite/.env
 3. [Copernicus Data Space](#3-copernicus-data-space)
 4. [AWS S3](#4-aws-s3)
 5. [Google Maps API](#5-google-maps-api)
-6. [Application Settings](#6-application-settings)
-7. [Complete .env Reference](#7-complete-env-reference)
-8. [Troubleshooting](#8-troubleshooting)
+6. [Perplexity AI (Investigation Enrichment)](#6-perplexity-ai-investigation-enrichment)
+7. [OpenAI (IntelligentCoBParser Vision)](#7-openai-intelligentcobparser-vision)
+8. [Application Settings](#8-application-settings)
+9. [Complete .env Reference](#9-complete-env-reference)
+10. [Troubleshooting](#10-troubleshooting)
 
 ---
 
@@ -85,10 +87,10 @@ DATABASE_URL=postgresql://oneka_user:your_secure_password@localhost:5432/oneka_d
 DATABASE_TEST_URL=postgresql://oneka_user:your_secure_password@localhost:5432/oneka_test
 ```
 
-| Variable | Format | Description |
-|----------|--------|-------------|
-| `DATABASE_URL` | `postgresql://user:password@host:port/dbname` | Main development database connection |
-| `DATABASE_TEST_URL` | Same format | Test database (used by pytest, destroyed/rebuilt each run) |
+| Variable            | Format                                        | Description                                                |
+| ------------------- | --------------------------------------------- | ---------------------------------------------------------- |
+| `DATABASE_URL`      | `postgresql://user:password@host:port/dbname` | Main development database connection                       |
+| `DATABASE_TEST_URL` | Same format                                   | Test database (used by pytest, destroyed/rebuilt each run) |
 
 > Replace `your_secure_password` with the password you set during `CREATE USER`. The default in `setup_database.sql` is `password` — change it for anything beyond local development.
 
@@ -121,8 +123,8 @@ redis-cli ping
 REDIS_URL=redis://localhost:6379/0
 ```
 
-| Variable | Format | Description |
-|----------|--------|-------------|
+| Variable    | Format                        | Description                                                       |
+| ----------- | ----------------------------- | ----------------------------------------------------------------- |
 | `REDIS_URL` | `redis://host:port/db_number` | Celery broker + tile cache. Default port is 6379, default db is 0 |
 
 The default value `redis://localhost:6379/0` works out of the box for a fresh Redis install with no password set.
@@ -168,12 +170,14 @@ To get OAuth2 credentials:
 ### Configure in both `.env` files
 
 **`backend/.env`:**
+
 ```env
 COPERNICUS_USERNAME=your_email@example.com
 COPERNICUS_PASSWORD=your_copernicus_password
 ```
 
 **`satellite/.env`:**
+
 ```env
 COPERNICUS_USERNAME=your_email@example.com
 COPERNICUS_PASSWORD=your_copernicus_password
@@ -181,12 +185,12 @@ COPERNICUS_CLIENT_ID=your_client_id_here
 COPERNICUS_CLIENT_SECRET=your_client_secret_here
 ```
 
-| Variable | Required | Where | Description |
-|----------|----------|-------|-------------|
-| `COPERNICUS_USERNAME` | Yes (for satellite downloads) | Both | Your registered email address |
-| `COPERNICUS_PASSWORD` | Yes (for satellite downloads) | Both | Your account password |
-| `COPERNICUS_CLIENT_ID` | No | satellite only | OAuth2 client ID (Sentinel Hub Dashboard) |
-| `COPERNICUS_CLIENT_SECRET` | No | satellite only | OAuth2 client secret (shown once at creation) |
+| Variable                   | Required                      | Where          | Description                                   |
+| -------------------------- | ----------------------------- | -------------- | --------------------------------------------- |
+| `COPERNICUS_USERNAME`      | Yes (for satellite downloads) | Both           | Your registered email address                 |
+| `COPERNICUS_PASSWORD`      | Yes (for satellite downloads) | Both           | Your account password                         |
+| `COPERNICUS_CLIENT_ID`     | No                            | satellite only | OAuth2 client ID (Sentinel Hub Dashboard)     |
+| `COPERNICUS_CLIENT_SECRET` | No                            | satellite only | OAuth2 client secret (shown once at creation) |
 
 > These credentials are the same across both files — use the same email/password for both.
 
@@ -251,6 +255,7 @@ S3 stores satellite GeoTIFFs, generated map tiles, and PDF certificates.
 ### Configure in both `.env` files
 
 **`backend/.env`:**
+
 ```env
 AWS_ACCESS_KEY_ID=AKIA...your_key_id
 AWS_SECRET_ACCESS_KEY=your_secret_access_key
@@ -259,6 +264,7 @@ AWS_S3_BUCKET=oneka-satellite-data
 ```
 
 **`satellite/.env`:**
+
 ```env
 AWS_ACCESS_KEY_ID=AKIA...your_key_id
 AWS_SECRET_ACCESS_KEY=your_secret_access_key
@@ -266,13 +272,13 @@ AWS_REGION=us-east-1
 S3_BUCKET=oneka-satellite-data
 ```
 
-| Variable | Where | Description |
-|----------|-------|-------------|
-| `AWS_ACCESS_KEY_ID` | Both | Starts with `AKIA` (20 characters) |
-| `AWS_SECRET_ACCESS_KEY` | Both | 40-character secret (shown once at creation) |
-| `AWS_REGION` | Both | AWS region where your bucket lives (e.g. `us-east-1`) |
-| `AWS_S3_BUCKET` | backend | Bucket name as read by Pydantic Settings |
-| `S3_BUCKET` | satellite | Same bucket, different env var name (read by `os.getenv`) |
+| Variable                | Where     | Description                                               |
+| ----------------------- | --------- | --------------------------------------------------------- |
+| `AWS_ACCESS_KEY_ID`     | Both      | Starts with `AKIA` (20 characters)                        |
+| `AWS_SECRET_ACCESS_KEY` | Both      | 40-character secret (shown once at creation)              |
+| `AWS_REGION`            | Both      | AWS region where your bucket lives (e.g. `us-east-1`)     |
+| `AWS_S3_BUCKET`         | backend   | Bucket name as read by Pydantic Settings                  |
+| `S3_BUCKET`             | satellite | Same bucket, different env var name (read by `os.getenv`) |
 
 > **Important:** `AWS_S3_BUCKET` (backend) and `S3_BUCKET` (satellite) must point to the same bucket. Use identical values.
 
@@ -325,34 +331,115 @@ Google Maps requires a billing account. New accounts get $200/month free credit 
 GOOGLE_MAPS_API_KEY=AIza...your_api_key
 ```
 
-| Variable | Required | Description |
-|----------|----------|-------------|
+| Variable              | Required                               | Description                        |
+| --------------------- | -------------------------------------- | ---------------------------------- |
 | `GOOGLE_MAPS_API_KEY` | No (maps proxy returns 503 without it) | Starts with `AIza`, ~39 characters |
 
 > Optional for local development. The maps proxy endpoints will return errors without it, but all other functionality works normally.
 
 ---
 
-## 6. Application Settings
+## 6. Perplexity AI (Investigation Enrichment)
+
+**Used by:** `backend/.env` only
+
+The Perplexity API powers automatic project context enrichment for the single-project investigation pipeline. When a user creates an investigation and calls `POST /investigations/{id}/enrich`, the backend calls Perplexity Sonar-Pro with the raw project name and receives a structured `ProjectContext` (canonical name, county, fiscal years, GPS coordinates, aliases).
+
+### Get a Perplexity API key
+
+1. Go to [https://www.perplexity.ai/settings/api](https://www.perplexity.ai/settings/api)
+2. Log in or create a Perplexity account
+3. Under **API Keys**, click **Generate**
+4. Copy the key — it starts with `pplx-`
+5. Optionally set a monthly spend limit in the Billing section
+
+### Configure in `backend/.env`
+
+```env
+PERPLEXITY_API_KEY=pplx-...your_api_key
+PERPLEXITY_MODEL=sonar-pro
+```
+
+| Variable             | Required                                                                | Description                                                                    |
+| -------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `PERPLEXITY_API_KEY` | No (enrichment returns 503 without it; manual context path still works) | Starts with `pplx-`                                                            |
+| `PERPLEXITY_MODEL`   | No (default: `sonar-pro`)                                               | `sonar` / `sonar-pro` / `sonar-reasoning` — pro gives the most structured JSON |
+
+> **Fallback:** If `PERPLEXITY_API_KEY` is unset or the API is unavailable, `POST /enrich` returns `502`. Users can then supply context manually via `PATCH /investigations/{id}/context` and proceed directly to scraping. No functionality is blocked — Perplexity enrichment is an optional quality improvement.
+
+---
+
+## 7. OpenAI (IntelligentCoBParser Vision)
+
+**Used by:** `backend/.env` only
+
+The OpenAI GPT-4o Vision API is used by `IntelligentCoBParser` to extract financial data from Kenya Controller of Budget BIRR PDF reports. It is called only during the scraping stage of a single-project investigation, when a relevant COB BIRR PDF is found.
+
+### Get an OpenAI API key
+
+1. Go to [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+2. Log in or create an OpenAI account
+3. Click **Create new secret key**
+4. Give it a name (e.g. `oneka-dev`) and click **Create**
+5. Copy the key immediately — it starts with `sk-` and is shown only once
+6. In **Settings** > **Billing**, add credits or set up a pay-as-you-go plan
+
+### Cost estimation
+
+GPT-4o Vision pricing (March 2026): **$5.00 per 1M input tokens**, **$15.00 per 1M output tokens**.
+
+Each COB PDF page rendered at 200 DPI is approximately 1.5–2M tokens of image data. A typical investigation processes 5–15 candidate pages.
+
+**Estimated cost per investigation: $0.10–$1.50** (highly dependent on PDF length and project data density).
+
+The `VISION_COST_LIMIT_USD` cap (default `$5.00`) prevents runaway spend on unusually long PDFs.
+
+### Configure in `backend/.env`
+
+```env
+OPENAI_API_KEY=sk-...your_api_key
+OPENAI_VISION_MODEL=gpt-4o
+VISION_MAX_PAGES=20
+VISION_DPI=200
+VISION_COST_LIMIT_USD=5.0
+```
+
+| Variable                | Required                                      | Description                                                                       |
+| ----------------------- | --------------------------------------------- | --------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`        | No (COB Vision extraction skipped without it) | Starts with `sk-proj-` or `sk-`                                                   |
+| `OPENAI_VISION_MODEL`   | No (default: `gpt-4o`)                        | `gpt-4o` is the only model currently supported                                    |
+| `VISION_MAX_PAGES`      | No (default: `20`)                            | Maximum candidate pages sent to Vision per PDF                                    |
+| `VISION_DPI`            | No (default: `200`)                           | Resolution for page rendering (higher = more tokens = higher cost)                |
+| `VISION_COST_LIMIT_USD` | No (default: `5.0`)                           | Per-investigation Vision spend cap in USD. Set to `0` to disable Vision entirely. |
+
+> **System dependency:** `IntelligentCoBParser` uses `pdf2image` which requires `poppler-utils`:
+>
+> ```bash
+> sudo apt install poppler-utils
+> ```
+
+---
+
+## 8. Application Settings
 
 These variables control application behavior and don't require external credentials.
 
 ### Backend-only settings (`backend/.env`)
 
-| Variable | Default | Valid values | Description |
-|----------|---------|-------------|-------------|
-| `APP_NAME` | `ONEKA AI API` | Any string | Application name shown in API docs |
-| `DEBUG` | `False` | `True` / `False` | Enables debug logging and stack traces |
-| `ENVIRONMENT` | `development` | `development` / `staging` / `production` | Current environment |
-| `API_VERSION` | `1.0.0` | Semver string | API version displayed in docs |
-| `API_HOST` | `0.0.0.0` | IP address | Uvicorn bind address |
-| `API_PORT` | `8000` | 1024–65535 | Uvicorn bind port |
-| `SECRET_KEY` | (insecure default) | Random 32+ char string | JWT token signing key |
-| `ALGORITHM` | `HS256` | `HS256` / `HS384` / `HS512` | JWT signing algorithm |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Positive integer | JWT token expiry in minutes |
-| `PPIP_BASE_URL` | `https://tenders.go.ke` | URL | Kenya PPIP tender portal base URL |
-| `KMHFL_API_URL` | `https://api.kmhfr.health.go.ke/api` | URL | Kenya Master Health Facility List API |
-| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` | Logging verbosity |
+| Variable                      | Default                              | Valid values                                        | Description                            |
+| ----------------------------- | ------------------------------------ | --------------------------------------------------- | -------------------------------------- |
+| `APP_NAME`                    | `ONEKA AI API`                       | Any string                                          | Application name shown in API docs     |
+| `DEBUG`                       | `False`                              | `True` / `False`                                    | Enables debug logging and stack traces |
+| `ENVIRONMENT`                 | `development`                        | `development` / `staging` / `production`            | Current environment                    |
+| `API_VERSION`                 | `1.0.0`                              | Semver string                                       | API version displayed in docs          |
+| `API_HOST`                    | `0.0.0.0`                            | IP address                                          | Uvicorn bind address                   |
+| `API_PORT`                    | `8000`                               | 1024–65535                                          | Uvicorn bind port                      |
+| `SECRET_KEY`                  | (insecure default)                   | Random 32+ char string                              | JWT token signing key                  |
+| `ALGORITHM`                   | `HS256`                              | `HS256` / `HS384` / `HS512`                         | JWT signing algorithm                  |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30`                                 | Positive integer                                    | JWT token expiry in minutes            |
+| `PPIP_BASE_URL`               | `https://tenders.go.ke`              | URL                                                 | Kenya PPIP tender portal base URL      |
+| `KMHFL_API_URL`               | `https://api.kmhfr.health.go.ke/api` | URL                                                 | Kenya Master Health Facility List API  |
+| `LOG_LEVEL`                   | `INFO`                               | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` | Logging verbosity                      |
 
 **Generating a secure SECRET_KEY:**
 
@@ -362,24 +449,24 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ### Satellite-only settings (`satellite/.env`)
 
-| Variable | Default | Valid values | Description |
-|----------|---------|-------------|-------------|
-| `RAW_DATA_DIR` | `./data/raw` | Directory path | Where downloaded .SAFE scenes are stored |
-| `PROCESSED_DATA_DIR` | `./data/processed` | Directory path | Where processed GeoTIFFs are stored |
-| `TRAINING_DATA_DIR` | `./data/training` | Directory path | Where training CSVs live |
-| `SNAP_INSTALL_DIR` | `/usr/local/snap` | Directory path | ESA SNAP Toolbox install location |
-| `NUM_WORKERS` | `4` | 1–16 | Parallel processing workers |
-| `MAX_CLOUD_COVER` | `20` | 0–100 | Max cloud cover % for Sentinel-2 scene selection |
-| `BACKEND_API_URL` | `http://localhost:8000` | URL | Backend API for callbacks after processing |
-| `BACKEND_API_KEY` | — | String | API key for authenticating with the backend |
-| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` | Logging verbosity |
-| `LOG_FILE` | `./logs/satellite_processing.log` | File path | Log file location |
-| `DEBUG` | `False` | `True` / `False` | Enables debug mode |
-| `TEST_MODE` | `False` | `True` / `False` | Uses small data subsets for testing |
+| Variable             | Default                           | Valid values                                        | Description                                      |
+| -------------------- | --------------------------------- | --------------------------------------------------- | ------------------------------------------------ |
+| `RAW_DATA_DIR`       | `./data/raw`                      | Directory path                                      | Where downloaded .SAFE scenes are stored         |
+| `PROCESSED_DATA_DIR` | `./data/processed`                | Directory path                                      | Where processed GeoTIFFs are stored              |
+| `TRAINING_DATA_DIR`  | `./data/training`                 | Directory path                                      | Where training CSVs live                         |
+| `SNAP_INSTALL_DIR`   | `/usr/local/snap`                 | Directory path                                      | ESA SNAP Toolbox install location                |
+| `NUM_WORKERS`        | `4`                               | 1–16                                                | Parallel processing workers                      |
+| `MAX_CLOUD_COVER`    | `20`                              | 0–100                                               | Max cloud cover % for Sentinel-2 scene selection |
+| `BACKEND_API_URL`    | `http://localhost:8000`           | URL                                                 | Backend API for callbacks after processing       |
+| `BACKEND_API_KEY`    | —                                 | String                                              | API key for authenticating with the backend      |
+| `LOG_LEVEL`          | `INFO`                            | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` | Logging verbosity                                |
+| `LOG_FILE`           | `./logs/satellite_processing.log` | File path                                           | Log file location                                |
+| `DEBUG`              | `False`                           | `True` / `False`                                    | Enables debug mode                               |
+| `TEST_MODE`          | `False`                           | `True` / `False`                                    | Uses small data subsets for testing              |
 
 ---
 
-## 7. Complete .env Reference
+## 9. Complete .env Reference
 
 ### Minimum viable `backend/.env` (local development)
 
@@ -393,6 +480,46 @@ DEBUG=False
 
 Everything else has sensible defaults. Add AWS, Copernicus, and Google Maps credentials as needed.
 
+### Full `backend/.env` (all features enabled)
+
+```env
+# Core
+DATABASE_URL=postgresql://oneka_user:password@localhost:5432/oneka_dev
+DATABASE_TEST_URL=postgresql://oneka_user:password@localhost:5432/oneka_test
+REDIS_URL=redis://localhost:6379/0
+SECRET_KEY=change_me_to_something_random_in_production
+DEBUG=False
+ENVIRONMENT=development
+LOG_LEVEL=INFO
+
+# AWS S3 (satellite data, tiles, certificates)
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=oneka-satellite-data
+
+# Copernicus (satellite imagery downloads)
+COPERNICUS_USERNAME=your_email@example.com
+COPERNICUS_PASSWORD=your_copernicus_password
+
+# Google Maps (tile proxy)
+GOOGLE_MAPS_API_KEY=AIza...
+
+# Perplexity AI (investigation enrichment)
+PERPLEXITY_API_KEY=pplx-...
+PERPLEXITY_MODEL=sonar-pro
+
+# OpenAI (IntelligentCoBParser Vision)
+OPENAI_API_KEY=sk-...
+OPENAI_VISION_MODEL=gpt-4o
+VISION_MAX_PAGES=20
+VISION_DPI=200
+VISION_COST_LIMIT_USD=5.0
+
+# ML Model
+ML_MODEL_PATH=satellite/models/ghost_detector_v1.pkl
+```
+
 ### Minimum viable `satellite/.env` (local development)
 
 ```env
@@ -404,13 +531,14 @@ All other variables have defaults. Add Copernicus credentials when you need to d
 
 ---
 
-## 8. Troubleshooting
+## 10. Troubleshooting
 
 ### PostgreSQL
 
 **`FATAL: role "oneka_user" does not exist`**
 
 The database user hasn't been created. Run:
+
 ```bash
 sudo -u postgres psql -c "CREATE USER oneka_user WITH PASSWORD 'password';"
 ```
@@ -418,6 +546,7 @@ sudo -u postgres psql -c "CREATE USER oneka_user WITH PASSWORD 'password';"
 **`FATAL: database "oneka_dev" does not exist`**
 
 Run the setup script or create manually:
+
 ```bash
 sudo -u postgres psql -f backend/setup_database.sql
 ```
@@ -425,6 +554,7 @@ sudo -u postgres psql -f backend/setup_database.sql
 **`FATAL: Peer authentication failed for user "oneka_user"`**
 
 PostgreSQL is using peer auth instead of password auth. Edit `pg_hba.conf`:
+
 ```bash
 # Find the file
 sudo -u postgres psql -c "SHOW hba_file;"
@@ -434,15 +564,19 @@ sudo nano /etc/postgresql/15/main/pg_hba.conf
 ```
 
 Change the line:
+
 ```
 local   all   all   peer
 ```
+
 to:
+
 ```
 local   all   all   md5
 ```
 
 Then restart PostgreSQL:
+
 ```bash
 sudo systemctl restart postgresql
 ```
@@ -450,6 +584,7 @@ sudo systemctl restart postgresql
 **`ERROR: could not open extension control file "/usr/share/postgresql/15/extension/postgis.control": No such file or directory`**
 
 PostGIS extension is not installed:
+
 ```bash
 sudo apt install postgresql-15-postgis-3
 ```
@@ -461,6 +596,7 @@ Replace `15` with your PostgreSQL version (`psql --version`).
 **`Error: Could not connect to Redis at localhost:6379: Connection refused`**
 
 Redis is not running:
+
 ```bash
 sudo systemctl start redis-server
 sudo systemctl status redis-server
@@ -469,6 +605,7 @@ sudo systemctl status redis-server
 **Redis returns `NOAUTH Authentication required`**
 
 Redis has a password set. Update your connection URL:
+
 ```env
 REDIS_URL=redis://:your_redis_password@localhost:6379/0
 ```
@@ -497,12 +634,14 @@ Copernicus rate-limits API calls. Wait a few minutes and retry, or reduce `NUM_W
 **`botocore.exceptions.NoCredentialsError: Unable to locate credentials`**
 
 AWS credentials are not configured. Set them in your `.env`:
+
 ```env
 AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
 ```
 
 Or configure via the AWS CLI:
+
 ```bash
 aws configure
 ```
@@ -514,6 +653,7 @@ Your IAM user lacks the required S3 permissions. Attach `AmazonS3FullAccess` or 
 **`botocore.exceptions.ClientError: An error occurred (NoSuchBucket)`**
 
 The bucket doesn't exist. Create it in the AWS Console (section 4c) or via CLI:
+
 ```bash
 aws s3 mb s3://oneka-satellite-data --region us-east-1
 ```
@@ -535,6 +675,7 @@ aws s3 mb s3://oneka-satellite-data --region us-east-1
 **Tests pass but the app fails to start**
 
 Check that all required variables are set. The minimum required variable is `DATABASE_URL`:
+
 ```bash
 cd backend
 source venv-backend/bin/activate
@@ -555,4 +696,4 @@ A required setting is missing from `backend/.env`. The error message tells you w
 
 ---
 
-**ONEKA AI** — *Making the Invisible, Actionable*
+**ONEKA AI** — _Making the Invisible, Actionable_
