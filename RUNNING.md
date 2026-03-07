@@ -173,6 +173,8 @@ celery -A src.celery_app beat --loglevel=info
 
 ## 5. Running Tests
 
+### Backend Tests (281 tests — requires PostgreSQL)
+
 ```bash
 cd backend
 source venv-backend/bin/activate
@@ -194,6 +196,48 @@ source venv-backend/bin/activate
 ```
 
 **Current test status:** 281 passed, 1 skipped, 80% coverage
+
+### Data Acquisition Tests (45 tests — fully isolated)
+
+```bash
+cd data
+
+# Run full test suite (no database, network, or Playwright required)
+venv-data/bin/python -m pytest tests/ -v --tb=short
+```
+
+**Current test status:** 45 passed
+
+Tests cover: BaseScraper orchestration, CoBParser PDF table extraction, SQLAlchemy Core table definitions, scraper data transformations (EGP GPS, PPIP dates, NCA IDs, KMHFL cache, COB poller).
+
+### Satellite Tests (122 tests — fully isolated)
+
+```bash
+cd satellite
+
+# Run full test suite (no Copernicus API, S3, or SNAP required)
+venv-satellite/bin/python -m pytest tests/ -v --tb=short
+```
+
+**Current test status:** 122 passed
+
+Tests cover: FeatureEngineer (48 tests), Config class (15 tests), utility functions (26 tests), TileGenerator (10 tests), NDVI slope regression (7 tests), NDWI computation (6 tests), plus 8 core util tests.
+
+### Run All Tests
+
+```bash
+# From the project root — run all 448 tests across all modules
+cd backend  && ./venv-backend/bin/pytest tests/ -v --tb=short && cd ..
+cd data     && venv-data/bin/python -m pytest tests/ -v --tb=short && cd ..
+cd satellite && venv-satellite/bin/python -m pytest tests/ -v --tb=short && cd ..
+```
+
+| Module | Tests | Isolation | Requirements |
+|--------|-------|-----------|--------------|
+| `backend/tests/` | 281 | Integration | PostgreSQL + Redis |
+| `data/tests/` | 45 | Fully isolated | None (mocks only) |
+| `satellite/tests/` | 122 | Fully isolated | None (pure computation) |
+| **Total** | **448** | | |
 
 ---
 

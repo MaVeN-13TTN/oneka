@@ -29,6 +29,8 @@ ENV/
 # Environment Variables
 .env
 .env.local
+.env.*
+!.env.example
 
 # IDE
 .vscode/
@@ -63,4 +65,4 @@ satellite_data/
 temp/
 *.tif
 *.SAFE
-SPRINT*-SETUP.md
+
