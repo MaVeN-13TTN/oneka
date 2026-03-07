@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     # Override via ML_MODEL_PATH env var if the model is stored elsewhere.
     ml_model_path: str = str(_REPO_ROOT / "satellite" / "models" / "ghost_detector_v1.pkl")
 
+    # Perplexity AI (investigation enrichment)
+    perplexity_api_key: Optional[str] = None
+    perplexity_model: str = "sonar-pro"  # sonar | sonar-pro | sonar-reasoning
+
+    # OpenAI (IntelligentCoBParser Vision extraction)
+    openai_api_key: Optional[str] = None
+    openai_vision_model: str = "gpt-4o"  # model used for COB page extraction
+    vision_max_pages: int = 20           # max candidate pages sent to Vision per PDF
+    vision_dpi: int = 200                # DPI for pdf2image page rendering
+    vision_cost_limit_usd: float = 5.0   # per-investigation cap on OpenAI Vision spend
+
     # Phase 5 — Tiles & Google Maps
     tile_s3_prefix: str = "tiles"
     tile_generation_timeout: int = 600  # seconds
