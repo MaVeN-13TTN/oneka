@@ -130,3 +130,26 @@ def refresh_kmhfl_task(self):
     except Exception as exc:
         logger.error(f"refresh_kmhfl_task failed: {exc}", exc_info=True)
         raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    name="src.tasks.ingestion_tasks.scrape_nca_task",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=600,
+)
+def scrape_nca_task(self):
+    """
+    Scrapes NCA (National Construction Authority) approved projects.
+
+    NCA data changes infrequently — scheduled monthly via Celery beat.
+    """
+    try:
+        from data.scrapers.nca import NCAScraper
+        scraper = NCAScraper()
+        count = _run(scraper.run())
+        logger.info(f"scrape_nca_task: saved {count} records")
+        return {"status": "ok", "saved": count}
+    except Exception as exc:
+        logger.error(f"scrape_nca_task failed: {exc}", exc_info=True)
+        raise self.retry(exc=exc)

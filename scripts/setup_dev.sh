@@ -132,6 +132,28 @@ if PGPASSWORD=password psql -U oneka_user -d oneka_dev -h localhost -c "SELECT C
   fi
 fi
 
+# ── Load admin boundaries (Phase 2 Tier 3 geolocation) ───────────────
+echo ""
+echo "--- Loading admin boundaries ---"
+if PGPASSWORD=password psql -U oneka_user -d oneka_dev -h localhost -c "SELECT COUNT(*) FROM admin_boundaries;" &>/dev/null 2>&1; then
+  BOUNDARY_COUNT=$(PGPASSWORD=password psql -U oneka_user -d oneka_dev -h localhost -t -c "SELECT COUNT(*) FROM admin_boundaries;" | tr -d ' \n')
+  if [ "$BOUNDARY_COUNT" -eq "0" ]; then
+    GEOJSON_FILE="$REPO_ROOT/backend/ken_adm_geojson/ken_admin2.geojson"
+    if [ -f "$GEOJSON_FILE" ]; then
+      echo "Loading Level 2 (sub-county) boundaries from ken_admin2.geojson..."
+      (cd backend && PGPASSWORD=password DATABASE_URL=postgresql://oneka_user:password@localhost:5432/oneka_dev \
+        venv-backend/bin/python scripts/load_ward_boundaries.py --geojson "$GEOJSON_FILE")
+    else
+      echo "NOTE: ken_admin2.geojson not found at $GEOJSON_FILE"
+      echo "      Download from: https://data.humdata.org/dataset/cod-ab-ken"
+    fi
+  else
+    echo "✓ $BOUNDARY_COUNT boundary record(s) already loaded — skipping"
+  fi
+else
+  echo "NOTE: admin_boundaries table not found — run Alembic migrations first"
+fi
+
 echo ""
 echo "=== Setup complete ==="
 echo ""
