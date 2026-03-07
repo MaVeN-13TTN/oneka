@@ -2,10 +2,14 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 
 from .base import BaseScraper, logger
+
+if TYPE_CHECKING:
+    from ..context import ProjectContext
 
 # Downloaded report metadata is tracked in a JSON cache file.
 # FinancialService.ingest_cob_report() processes each PDF and writes
@@ -121,10 +125,15 @@ class CoBPoller:
                 print(f"Failed to download {url}: {e}")
                 return None
 
-    async def process(self):
+    async def process(self, ctx: "ProjectContext | None" = None) -> None:
         """
         Polls the COB website for BIRR report PDFs, downloads new ones,
         and persists their metadata to data/cache/cob_reports.json.
+
+        When *ctx* is provided with *fiscal_years* populated, only reports
+        matching those years are downloaded (targeted mode). The COB URL
+        structure encodes the year as ``FY-YYYY-YYYY`` so matching is a simple
+        substring check with ``/`` replaced by ``-``.
 
         FinancialService.ingest_cob_report() later parses each PDF and
         writes FinancialRecord rows to the database.
@@ -133,6 +142,17 @@ class CoBPoller:
         if not reports:
             logger.warning("CoBPoller: no report links found.")
             return
+
+        # Targeted mode: filter to relevant fiscal years only
+        if ctx and ctx.fiscal_years:
+            reports = [
+                r for r in reports
+                if any(fy.replace("/", "-") in r["url"] for fy in ctx.fiscal_years)
+            ]
+            logger.info(
+                f"CoBPoller: filtered to {len(reports)} reports "
+                f"for fiscal years {ctx.fiscal_years}"
+            )
 
         # Load existing cache
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)

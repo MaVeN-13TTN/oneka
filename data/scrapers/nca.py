@@ -1,6 +1,7 @@
 import asyncio
 import re
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from playwright.async_api import async_playwright
 from sqlalchemy.dialects.postgresql import insert
@@ -8,6 +9,9 @@ from sqlalchemy.dialects.postgresql import insert
 from .base import BaseScraper, logger
 from ..db import AsyncSessionLocal
 from ..models import procurement_records
+
+if TYPE_CHECKING:
+    from ..context import ProjectContext
 
 class NCAScraper(BaseScraper):
     BASE_URL = "https://www.nca.go.ke/approved-projects"
@@ -19,13 +23,21 @@ class NCAScraper(BaseScraper):
         "Market", "Center", "Plaza", "Tower", "Highway"
     ]
 
-    async def fetch(self):
+    async def fetch(self, ctx: "ProjectContext | None" = None) -> list[dict]:
+        """
+        Fetches NCA approved projects.
+
+        When *ctx* is None (bulk mode) loops over all SEARCH_TERMS.
+        When *ctx* is provided (targeted mode) uses ctx.search_terms —
+        typically 1–4 project-specific terms instead of the generic 14.
+        """
+        terms = (ctx.search_terms if ctx and ctx.search_terms else self.SEARCH_TERMS)
         all_rows = []
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            for term in self.SEARCH_TERMS:
+            for term in terms:
                 logger.info(f"Searching NCA for: {term}...")
                 try:
                     await page.goto(self.BASE_URL, timeout=60000)
