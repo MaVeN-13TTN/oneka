@@ -1,347 +1,303 @@
-# ONEKA AI - Backend API
+# ONEKA AI — Backend API
 
-**Kenya's First Autonomous Infrastructure Auditing Platform - Backend Services**
+**Kenya's First Autonomous Infrastructure Auditing Platform**
 
-## Overview
-
-ONEKA AI backend provides RESTful API services for infrastructure project monitoring, combining procurement data, financial records, satellite imagery analysis, and machine learning predictions to detect ghost projects.
+FastAPI backend that combines procurement data, financial records, satellite imagery, and ML risk scoring to detect ghost infrastructure projects.
 
 ## Tech Stack
 
-- **Framework**: FastAPI 0.109.0
-- **Database**: PostgreSQL 15 with PostGIS extension
-- **ORM**: SQLAlchemy 2.0.25
-- **Migrations**: Alembic 1.13.1
-- **Task Queue**: Celery + Redis
-- **Python**: 3.11+
+| Component | Version |
+|-----------|---------|
+| Python | 3.12 |
+| FastAPI | 0.109.0 |
+| PostgreSQL + PostGIS | 15+ |
+| SQLAlchemy | 2.0.25 |
+| Alembic | 1.13.1 |
+| Celery + Redis | 5.3.6 |
+| scikit-learn | 1.4.0 |
+| WeasyPrint | 61.0+ |
 
 ## Project Structure
 
 ```
 backend/
+├── alembic/                  # Database migrations
+│   └── versions/             # 4 migration files (initial → satellite divergence)
+├── ken_adm_geojson/          # Kenya admin boundary GeoJSON (L0–L2 + centroids)
+├── scripts/
+│   ├── seed_training_projects.py   # Seed 30 training projects into DB
+│   └── load_ward_boundaries.py     # Load admin boundaries from GeoJSON
 ├── src/
-│   ├── models/           # SQLAlchemy database models
-│   ├── schemas/          # Pydantic validation schemas
-│   ├── routers/          # API route handlers
-│   ├── services/         # Business logic layer
-│   ├── database.py       # Database connection
-│   ├── config.py         # Application settings
-│   └── main.py           # FastAPI application entry
-├── alembic/              # Database migrations
-├── tests/                # Unit and integration tests
-├── docs/                 # Backend documentation
-└── requirements.txt      # Python dependencies
+│   ├── middleware/
+│   │   └── security_headers.py     # CSP, HSTS, X-Frame-Options
+│   ├── models/               # 6 SQLAlchemy ORM models
+│   │   ├── project.py        # projects — master registry (UUID PK)
+│   │   ├── procurement.py    # procurement_records — tender data
+│   │   ├── financial.py      # financial_records — budget/absorption
+│   │   ├── geolocation.py    # geolocation_records — GPS + PostGIS POINT
+│   │   ├── satellite.py      # satellite_analyses — NDVI/SAR metrics
+│   │   └── admin_boundary.py # admin_boundaries — ward/county polygons
+│   ├── routers/              # 9 API routers (34 endpoints)
+│   │   ├── health.py         # Health checks & system status
+│   │   ├── procurement.py    # CRUD + scraping triggers
+│   │   ├── projects.py       # Project listing, GeoJSON, reconciliation
+│   │   ├── financial.py      # Budget records & absorption analysis
+│   │   ├── geolocation.py    # 3-tier GPS resolution
+│   │   ├── satellite.py      # Satellite analysis & tiles
+│   │   ├── risk.py           # ML ghost probability scoring
+│   │   ├── maps.py           # Google Maps tile proxy
+│   │   └── certificates.py   # Section 106B legal PDF generation
+│   ├── schemas/              # Pydantic request/response models
+│   ├── services/             # Business logic layer (11 services)
+│   ├── tasks/                # Celery background tasks (4 modules)
+│   ├── main.py               # FastAPI application entry point
+│   ├── celery_app.py         # Celery configuration + beat schedule
+│   ├── config.py             # Pydantic settings (reads .env)
+│   ├── database.py           # SQLAlchemy engine + session factory
+│   └── rate_limit.py         # Shared slowapi limiter instance
+├── templates/
+│   └── certificate_106b.html # Jinja2 template for legal PDFs
+├── tests/                    # 281 tests, 80% coverage
+├── Dockerfile                # Production image (python:3.12-slim)
+├── alembic.ini               # Migration configuration
+├── requirements.txt          # Python dependencies
+└── setup_database.sql        # PostgreSQL/PostGIS initialization
 ```
 
-## Setup Instructions
-
-### Prerequisites
-
-- Python 3.11 or higher
-- PostgreSQL 15
-- PostGIS extension
-- Redis (for Celery tasks)
-
-### 1. Install PostgreSQL with PostGIS
-
-#### Ubuntu/Debian
+## Quick Start
 
 ```bash
-sudo apt update
-sudo apt install postgresql-15 postgresql-contrib-15
-sudo apt install postgis postgresql-15-postgis-3
+# 1. Database setup (as postgres superuser)
+sudo -u postgres psql -f setup_database.sql
+
+# 2. Create virtual environment
+uv venv venv-backend --python 3.12
+
+# 3. Install dependencies
+uv pip install -r requirements.txt --python venv-backend/bin/python
+
+# 4. Download spaCy model (for geolocation NER)
+venv-backend/bin/python -m spacy download en_core_web_sm
+
+# 5. Configure environment
+cp .env.example .env   # then edit with your credentials
+
+# 6. Run migrations
+venv-backend/bin/alembic upgrade head
+
+# 7. Seed training data (optional)
+PGPASSWORD=password DATABASE_URL=postgresql://oneka_user:password@localhost:5432/oneka_dev \
+  venv-backend/bin/python scripts/seed_training_projects.py
+
+# 8. Start API server
+venv-backend/bin/uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-#### macOS
-
-```bash
-brew install postgresql@15
-brew install postgis
-```
-
-### 2. Create Database
-
-```bash
-# Start PostgreSQL service
-sudo systemctl start postgresql  # Linux
-brew services start postgresql@15  # macOS
-
-# Create database and user
-sudo -u postgres psql
-```
-
-```sql
--- In PostgreSQL shell
-CREATE DATABASE oneka_dev;
-CREATE DATABASE oneka_test;
-CREATE USER oneka_user WITH PASSWORD 'your_secure_password';
-GRANT ALL PRIVILEGES ON DATABASE oneka_dev TO oneka_user;
-GRANT ALL PRIVILEGES ON DATABASE oneka_test TO oneka_user;
-
--- Connect to database and enable PostGIS
-\c oneka_dev
-CREATE EXTENSION postgis;
-CREATE EXTENSION postgis_topology;
-
--- Verify PostGIS installation
-SELECT PostGIS_version();
-
--- Exit
-\q
-```
-
-### 3. Python Environment Setup
-
-```bash
-# Navigate to backend directory
-cd backend
-
-# Create virtual environment
-python3.11 -m venv venv
-
-# Activate virtual environment
-source venv/bin/activate  # Linux/macOS
-# OR
-venv\Scripts\activate  # Windows
-
-# Upgrade pip
-pip install --upgrade pip
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 4. Environment Configuration
-
-```bash
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your configurations
-nano .env  # or use your preferred editor
-```
-
-Update the `DATABASE_URL` with your actual credentials:
-
-```
-DATABASE_URL=postgresql://oneka_user:your_password@localhost:5432/oneka_dev
-```
-
-### 5. Database Migrations
-
-```bash
-# Initialize Alembic (first time only)
-alembic init alembic
-
-# Run migrations
-alembic upgrade head
-
-# Verify tables created
-psql -U oneka_user -d oneka_dev -c "\dt"
-```
-
-### 6. Run Development Server
-
-```bash
-# Start FastAPI development server
-uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-
-# Alternative using Python
-python -m uvicorn src.main:app --reload
-```
-
-Server will be available at:
-
-- API: http://localhost:8000
-- Interactive Docs: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+API docs: http://localhost:8000/docs | http://localhost:8000/redoc
 
 ## API Endpoints
 
 ### Health & Status
 
-- `GET /api/v1/health` - Basic health check
-- `GET /api/v1/health/db` - Database connectivity check
-- `GET /api/v1/status` - System status with record counts
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/health` | Basic health check |
+| `GET` | `/api/v1/health/db` | Database + PostGIS check |
+| `GET` | `/api/v1/status` | System status with record counts |
+| `GET` | `/api/v1/ping` | Minimal ping for load balancers |
 
-### Projects (Sprint 2+)
+### Projects
 
-- `GET /api/v1/projects` - List all projects
-- `POST /api/v1/projects` - Create new project
-- `GET /api/v1/projects/{uuid}` - Get project details
-- `PUT /api/v1/projects/{uuid}` - Update project
-- `DELETE /api/v1/projects/{uuid}` - Delete project
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/projects` | Paginated list (filter: county, risk_level, status, project_type) |
+| `GET` | `/api/v1/projects/geojson` | GeoJSON FeatureCollection (optional `?risk_level=HIGH,CRITICAL`) |
+| `POST` | `/api/v1/projects/reconcile` | Batch-link procurement records via fuzzy matching |
+| `GET` | `/api/v1/projects/{uuid}` | Single project by UUID |
+| `GET` | `/api/v1/projects/{uuid}/truth-record` | Unified project card with all linked data |
 
-### Procurement (Sprint 2+)
+### Procurement
 
-- `GET /api/v1/procurement/tenders` - List tender records
-- `GET /api/v1/procurement/scrape` - Trigger PPIP scraper
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/procurement` | Create procurement record |
+| `GET` | `/api/v1/procurement` | List records (paginated, filterable, sortable) |
+| `GET` | `/api/v1/procurement/search` | Search by tender number |
+| `POST` | `/api/v1/procurement/scrape` | Trigger PPIP scraper |
+| `GET` | `/api/v1/procurement/stats/summary` | Statistics summary |
+| `GET` | `/api/v1/procurement/{id}` | Get single record |
+| `PUT` | `/api/v1/procurement/{id}` | Update record |
+| `DELETE` | `/api/v1/procurement/{id}` | Delete record |
+
+### Financial
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/financial/{uuid}` | All financial records for a project |
+| `GET` | `/api/v1/financial/{uuid}/absorption` | Absorption gap analysis |
+
+### Geolocation
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/geolocation/resolve` | Run 3-tier GPS resolution |
+| `GET` | `/api/v1/geolocation/coverage` | Tier breakdown statistics |
+
+### Satellite & Divergence
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/satellite/analyse/{uuid}` | Queue satellite analysis (Celery) |
+| `GET` | `/api/v1/satellite/status/{task_id}` | Poll task status |
+| `GET` | `/api/v1/satellite/tiles/{uuid}/ndvi/{z}/{x}/{y}` | NDVI tile (redirect or 202) |
+| `GET` | `/api/v1/satellite/tiles-status/{uuid}` | Tile generation status + URLs |
+| `GET` | `/api/v1/projects/{uuid}/divergence` | Financial vs physical divergence |
+| `GET` | `/api/v1/dashboard/heat-map` | All projects for heat-map |
+
+### Risk Scoring
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/risk/score/{uuid}` | ML ghost probability + feature breakdown |
+| `GET` | `/api/v1/risk/heat-map` | GeoJSON with risk levels |
+
+### Maps
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/maps/tiles/session` | Google Maps session token |
+| `GET` | `/api/v1/maps/tiles/{token}/{z}/{x}/{y}` | Tile proxy (streaming) |
+
+### Certificates
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/certificates/{uuid}` | Generate Section 106B(4) PDF |
+| `GET` | `/api/v1/certificates/{uuid}/status` | Check certificate readiness |
 
 ## Database Schema
 
-### Core Tables
+Six tables with PostGIS geometry columns:
 
-#### projects
+| Table | Description |
+|-------|-------------|
+| `projects` | Master registry — UUID PK, risk level, ghost probability |
+| `procurement_records` | Tender data from eGP/PPIP/NCA — contract values, GPS, contractor info |
+| `financial_records` | Budget allocation/absorption from COB BIRR reports |
+| `geolocation_records` | 3-tier GPS coordinates with PostGIS POINT geometry |
+| `satellite_analyses` | NDVI/SAR metrics, temporal slopes, divergence scores |
+| `admin_boundaries` | Kenya admin polygons with PostGIS MULTIPOLYGON geometry |
 
-Master registry for all infrastructure projects with universal UUID.
+Migrations are in `alembic/versions/`. Run `alembic upgrade head` to initialize.
 
-#### procurement_records
+## Services
 
-Tender data scraped from PPIP (Public Procurement Information Portal).
+| Service | Purpose |
+|---------|---------|
+| `ProcurementService` | CRUD, scraping, deduplication, S3 document management |
+| `FinancialService` | COB PDF ingestion, absorption gap calculation |
+| `ConcordanceService` | Entity resolution via RapidFuzz fuzzy matching (threshold >= 85) |
+| `GeolocationService` | 3-tier GPS: eGP embedded → KMHFL fuzzy match → ward centroid fallback |
+| `SatelliteService` | Queue Celery analysis, persist NDVI/SAR results, compute temporal slopes |
+| `DivergenceService` | Financial vs physical progress divergence scoring |
+| `RiskScoringService` | RandomForest ghost probability inference (10-feature vector) |
+| `TileService` | XYZ tile generation orchestration, S3 upload, presigned URLs |
+| `CertificateService` | Section 106B(4) legal PDF via Jinja2 + WeasyPrint |
+| `S3StorageService` | AWS S3 upload/download, presigned URLs (capped at 3600s), SHA-256 |
 
-#### financial_records
+## Celery Background Tasks
 
-Budget allocation and disbursement data from Controller of Budget.
+**Broker:** Redis | **Timezone:** Africa/Nairobi
 
-#### geolocation_records
+### Beat Schedule (automatic)
 
-GPS coordinates with PostGIS geometry for spatial queries.
+| Task | Schedule | Description |
+|------|----------|-------------|
+| `scrape_egp_task` | Daily 02:00 EAT | eGP Works tenders + GPS extraction |
+| `refresh_kmhfl_task` | 1st Sunday/month 03:00 | KMHFL facility cache refresh |
+| `scrape_nca_task` | 15th of month 03:30 | NCA approved projects |
+| `batch_score_task` | Sunday 04:00 | Weekly ML re-scoring of all ONGOING projects |
 
-#### satellite_analyses
+### On-demand Tasks
 
-NDVI, SAR, and other satellite metrics for change detection.
+| Task | Trigger | Description |
+|------|---------|-------------|
+| `import_ppip_historical_task` | Manual | One-time historical PPIP import |
+| `ingest_cob_report_task` | Manual | Parse COB BIRR PDF → financial records |
+| `analyse_project_task` | POST /satellite/analyse | Full satellite pipeline + ML scoring |
+| `generate_project_tiles_task` | GET /satellite/tiles | XYZ tile pyramid → S3 |
 
-See [docs/database-schema.md](docs/database-schema.md) for complete schema documentation.
-
-## Development Workflow
-
-### Create Feature Branch
-
-```bash
-git checkout develop
-git pull origin develop
-git checkout -b feature/backend/sprint1-database-setup
-```
-
-### Run Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=src --cov-report=html
-
-# Run specific test file
-pytest tests/test_models.py
-```
-
-### Code Quality
-
-```bash
-# Format code with Black
-black src/
-
-# Lint with flake8
-flake8 src/
-
-# Type checking with mypy
-mypy src/
-```
-
-### Create Migration
+### Start Workers
 
 ```bash
-# Auto-generate migration from model changes
-alembic revision --autogenerate -m "Add new column to projects table"
+# Worker (4 concurrent tasks)
+celery -A src.celery_app worker --loglevel=info --concurrency=4
 
-# Review generated migration in alembic/versions/
-# Edit if needed, then apply
-alembic upgrade head
+# Beat scheduler (periodic tasks)
+celery -A src.celery_app beat --loglevel=info
 ```
 
 ## Environment Variables
 
-| Variable       | Description                  | Default                  |
-| -------------- | ---------------------------- | ------------------------ |
-| `DATABASE_URL` | PostgreSQL connection string | -                        |
-| `DEBUG`        | Enable debug mode            | True                     |
-| `API_HOST`     | Server host                  | 0.0.0.0                  |
-| `API_PORT`     | Server port                  | 8000                     |
-| `REDIS_URL`    | Redis connection for Celery  | redis://localhost:6379/0 |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | **(required)** | PostgreSQL connection string |
+| `DATABASE_TEST_URL` | — | Test database URL |
+| `DEBUG` | `False` | Enable debug mode |
+| `ENVIRONMENT` | `development` | Environment name |
+| `SECRET_KEY` | — | JWT secret key |
+| `AWS_ACCESS_KEY_ID` | — | AWS credentials for S3 |
+| `AWS_SECRET_ACCESS_KEY` | — | AWS credentials for S3 |
+| `AWS_S3_BUCKET` | — | S3 bucket name |
+| `COPERNICUS_USERNAME` | — | ESA Copernicus credentials |
+| `COPERNICUS_PASSWORD` | — | ESA Copernicus credentials |
+| `GOOGLE_MAPS_API_KEY` | — | Google Maps API key (server-side) |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis for Celery |
+| `ML_MODEL_PATH` | `satellite/models/ghost_detector_v1.pkl` | Trained model path |
+
+## Security
+
+- **CSP headers** on all responses (relaxed for /docs and /redoc)
+- **HSTS**, X-Frame-Options, X-Content-Type-Options, X-XSS-Protection
+- **Rate limiting** via slowapi (maps 5/min session, satellite 10/min, reconcile 3/min)
+- **Input sanitization** — control char stripping, whitespace collapse, length truncation
+- **CORS** restricted to localhost:3000 (dev) and oneka.ai (prod)
+- **Presigned URLs** capped at 3600s
+- **Google API key** never exposed to frontend (server-side proxy only)
 
 ## Testing
 
 ```bash
-# Run all tests
-pytest
+cd backend
 
-# Run with verbose output
-pytest -v
+# Run all tests (281 pass, 80% coverage)
+./venv-backend/bin/pytest tests/ -v --tb=short
 
-# Run specific test class
-pytest tests/test_models.py::TestProjectModel
+# Run a specific test file
+./venv-backend/bin/pytest tests/test_phase4.py -v
 
-# Generate coverage report
-pytest --cov=src --cov-report=term-missing
+# Coverage report
+./venv-backend/bin/pytest tests/ --cov=src --cov-report=html
+open htmlcov/index.html
 ```
 
-## Troubleshooting
+Test database: `oneka_test` — created by `setup_database.sql`, tables auto-created/dropped per session.
 
-### PostGIS Extension Not Found
-
-```sql
--- Manually create extension
-sudo -u postgres psql -d oneka_dev
-CREATE EXTENSION postgis;
-```
-
-### Database Connection Refused
+## Docker
 
 ```bash
-# Check PostgreSQL service status
-sudo systemctl status postgresql
+# Build image
+docker build -t oneka-backend .
 
-# Start service if stopped
-sudo systemctl start postgresql
+# Full stack via docker-compose (from repo root)
+docker-compose up -d    # starts postgres, redis, api, worker
+docker-compose ps       # verify all healthy
 ```
-
-### Alembic Migration Conflicts
-
-```bash
-# Check current revision
-alembic current
-
-# View migration history
-alembic history
-
-# Downgrade one revision
-alembic downgrade -1
-```
-
-## Sprint 1 Status
-
-- [x] Backend folder structure created
-- [x] Requirements and dependencies defined
-- [ ] Database schema designed
-- [ ] PostgreSQL with PostGIS configured
-- [ ] Alembic migrations created
-- [ ] SQLAlchemy models implemented
-- [ ] FastAPI application structure set up
-- [ ] Health check endpoints implemented
-- [ ] API documentation completed
 
 ## Documentation
 
-- [Database Schema](docs/database-schema.md)
-- [API Design](docs/api-design.md)
-- [Development Guide](docs/development-guide.md)
-
-## Contributing
-
-See main project [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution guidelines.
-
-## License
-
-MIT License - See [LICENSE](../LICENSE) for details.
-
-## Contact
-
-**ONEKA AI Development Team**
-
-- Technical Issues: Create issue on GitHub
-- Email: dev@oneka.ai
+- [Database Setup](docs/database-setup-and-configuration.md)
 
 ---
 
-**ONEKA AI**: _Making the Invisible, Actionable_
+**ONEKA AI** — *Making the Invisible, Actionable*
