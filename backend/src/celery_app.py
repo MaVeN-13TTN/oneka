@@ -58,6 +58,11 @@ def create_celery_app() -> Celery:
                 "task": "src.tasks.ml_tasks.batch_score_task",
                 "schedule": crontab(hour=4, minute=0, day_of_week=0),
             },
+            # NCA approved projects — 15th of every month at 03:30 EAT
+            "scrape-nca-monthly": {
+                "task": "src.tasks.ingestion_tasks.scrape_nca_task",
+                "schedule": crontab(hour=3, minute=30, day_of_month=15),
+            },
         },
     )
 
