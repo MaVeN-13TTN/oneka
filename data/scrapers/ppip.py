@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import httpx
 from sqlalchemy.dialects.postgresql import insert
@@ -7,6 +8,9 @@ from sqlalchemy.dialects.postgresql import insert
 from .base import BaseScraper, logger
 from ..db import AsyncSessionLocal
 from ..models import procurement_records
+
+if TYPE_CHECKING:
+    from ..context import ProjectContext
 
 
 class PPIPScraper(BaseScraper):
@@ -18,8 +22,22 @@ class PPIPScraper(BaseScraper):
         "Referer": "https://tenders.go.ke/",
     }
 
-    async def fetch(self):
-        """Fetches active tenders from the PPIP internal JSON API."""
+    async def fetch(self, ctx: "ProjectContext | None" = None) -> list[dict]:
+        """
+        Fetches tenders from the PPIP internal JSON API.
+
+        When *ctx* is None (bulk mode) returns all active tenders unchanged.
+        When *ctx* is provided (targeted mode) applies a RapidFuzz alias filter
+        so only tenders whose titles closely match ctx.aliases or ctx.canonical_name
+        are returned.
+        """
+        data = await self._fetch_all()
+        if ctx is None:
+            return data
+        return self._filter_by_context(data, ctx)
+
+    async def _fetch_all(self) -> list[dict]:
+        """Fetches all active tenders from the PPIP internal JSON API."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 response = await client.get(self.BASE_URL, headers=self.HEADERS)
@@ -28,6 +46,27 @@ class PPIPScraper(BaseScraper):
             except httpx.HTTPError as e:
                 logger.error(f"Error fetching PPIP data: {e}")
                 return []
+
+    def _filter_by_context(
+        self,
+        data: list[dict],
+        ctx: "ProjectContext",
+    ) -> list[dict]:
+        """
+        Post-fetch filter — keeps only tenders whose title fuzzy-matches
+        any of ctx.aliases or ctx.canonical_name (token_set_ratio ≥ 75).
+        """
+        from rapidfuzz import fuzz
+
+        candidates = ctx.aliases + ([ctx.canonical_name] if ctx.canonical_name else [])
+        results: list[dict] = []
+        for tender in data:
+            title = tender.get("title") or tender.get("description") or ""
+            for alias in candidates:
+                if alias and fuzz.token_set_ratio(title, alias) >= 75:
+                    results.append(tender)
+                    break
+        return results
 
     async def save(self, tenders_data):
         """

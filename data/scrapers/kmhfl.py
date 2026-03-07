@@ -1,11 +1,14 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, TYPE_CHECKING
 
 import httpx
 
 from .base import BaseScraper, logger
+
+if TYPE_CHECKING:
+    from ..context import ProjectContext
 
 # Local JSON cache — consumed by the geolocation service's Tier 2 fuzzy matcher.
 # No Facility table exists yet; the DB migration is tracked in Phase 2.
@@ -20,9 +23,26 @@ class KMHFLScraper(BaseScraper):
     # Pagination: fetch in chunks of 100 (default page_size is 30).
     PAGE_SIZE = 100
 
-    async def fetch(self) -> List[Any]:
+    async def fetch(self, ctx: "ProjectContext | None" = None) -> List[Any]:
         """
-        Fetches all facilities from the KMHFL REST API using paginated GET requests.
+        Fetches facilities from the KMHFL REST API.
+
+        When *ctx* is None (bulk mode) performs the full paginated download.
+        When *ctx* is provided with *coordinates* already set (Tier 0 — GPS
+        known from Perplexity enrichment), skips the bulk download entirely —
+        GeolocationService will use the coordinates directly.
+        """
+        if ctx and ctx.coordinates:
+            logger.info(
+                "KMHFL: GPS coordinates already known from enrichment "
+                f"({ctx.coordinates}), skipping bulk facility download."
+            )
+            return []
+        return await self._fetch_all()
+
+    async def _fetch_all(self) -> List[Any]:
+        """
+        Full paginated download from KMHFL REST API.
 
         The /api/facilities/facilities/ endpoint currently returns HTTP 500
         (server-side AttributeError — a live production bug on the MoH server).

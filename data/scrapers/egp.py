@@ -1,4 +1,6 @@
 import asyncio
+from typing import TYPE_CHECKING
+
 from playwright.async_api import async_playwright
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -6,6 +8,9 @@ from sqlalchemy.dialects.postgresql import insert
 from .base import BaseScraper, logger
 from ..db import AsyncSessionLocal
 from ..models import procurement_records, geolocation_records
+
+if TYPE_CHECKING:
+    from ..context import ProjectContext
 
 # GPS quality tier scores (Tier 1 — highest confidence source)
 EGP_MANUAL_PIN = 90
@@ -17,8 +22,21 @@ class EGPScraper(BaseScraper):
     TENDERS_URL = "https://egpkenya.go.ke/tender"
     API_URL_PART = "/api/xcommon/get-ten-tab-tender-details"
 
-    async def fetch(self):
+    async def fetch(self, ctx: "ProjectContext | None" = None) -> list[dict]:
         """
+        Fetches tender data from e-GP Kenya.
+
+        When *ctx* is None (bulk mode) navigates as before — Closed Works tenders,
+        all results. When *ctx* is provided (targeted mode) searches for each term
+        in ctx.search_terms and filters by ctx.procuring_entity if known.
+        """
+        if ctx is None:
+            return await self._fetch_all()
+        return await self._fetch_targeted(ctx)
+
+    async def _fetch_all(self) -> list[dict]:
+        """
+        Legacy bulk mode — intercepts all closed Works tenders.
         Launches a headless browser, navigates to closed Works tenders,
         and intercepts the API response containing tender details.
         """
@@ -93,6 +111,99 @@ class EGPScraper(BaseScraper):
             await browser.close()
 
         return data
+
+    async def _fetch_targeted(self, ctx: "ProjectContext") -> list[dict]:
+        """
+        Targeted mode — for each term in ctx.search_terms, fills the e-GP
+        search box and collects intercepted API results. De-duplicates across
+        terms by tender_no; optionally filters by ctx.procuring_entity.
+        """
+        collected: list[dict] = []
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            browser_ctx = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720},
+            )
+            page = await browser_ctx.new_page()
+
+            async def handle_response(response):
+                if self.API_URL_PART in response.url and response.status == 200:
+                    try:
+                        json_data = await response.json()
+                        if isinstance(json_data, dict):
+                            if "respData" in json_data:
+                                resp_data = json_data["respData"]
+                                if isinstance(resp_data, dict) and "tenderDetails" in resp_data:
+                                    collected.extend(resp_data["tenderDetails"])
+                                elif isinstance(resp_data, list):
+                                    collected.extend(resp_data)
+                            elif "data" in json_data:
+                                collected.extend(json_data["data"])
+                        elif isinstance(json_data, list):
+                            collected.extend(json_data)
+                    except Exception as e:
+                        logger.error(f"EGP: failed to parse JSON from {response.url}: {e}")
+
+            page.on("response", handle_response)
+
+            for term in ctx.search_terms:
+                logger.info(f"EGP targeted search: {term!r}")
+                try:
+                    await page.goto(self.TENDERS_URL, timeout=60000)
+                    await page.wait_for_load_state("networkidle")
+
+                    # Try to fill a text search input on the tender listing page
+                    search_locator = page.locator(
+                        'input[name="search"], input[type="search"], '
+                        'input[placeholder*="search" i], input[aria-label*="search" i]'
+                    )
+                    if await search_locator.count() > 0:
+                        await search_locator.first.fill(term)
+                        await page.keyboard.press("Enter")
+                    else:
+                        # Fallback: category-only filter (same as bulk mode)
+                        logger.warning(
+                            f"EGP: search input not found for {term!r}, "
+                            "falling back to Works Category filter."
+                        )
+                        count = await page.locator("select[aria-label='Column Type']").count()
+                        if count > 0:
+                            await page.locator("select[aria-label='Column Type']").select_option("2")
+                            await page.locator("button.btn-brown").first.click()
+
+                    await page.wait_for_timeout(5000)
+
+                except Exception as e:
+                    logger.error(f"EGP targeted search failed for {term!r}: {e}")
+                    try:
+                        await page.screenshot(path=f"egp_targeted_error_{term[:20]}.png")
+                    except Exception:
+                        pass
+
+            await browser.close()
+
+        # De-duplicate by tender_no; optionally filter by procuring_entity
+        all_data: dict[str, dict] = {}
+        for item in collected:
+            tender_no = item.get("tenderrefno") or item.get("tender_no")
+            if not tender_no:
+                continue
+            if ctx.procuring_entity:
+                from rapidfuzz import fuzz
+                pe = item.get("procuringEntity") or item.get("procuring_entity") or ""
+                if fuzz.token_set_ratio(pe, ctx.procuring_entity) < 70:
+                    continue
+            all_data[tender_no] = item
+
+        logger.info(
+            f"EGP targeted: {len(all_data)} unique tenders "
+            f"from {len(ctx.search_terms)} search term(s)"
+        )
+        return list(all_data.values())
 
     async def save(self, tenders_data):
         """
