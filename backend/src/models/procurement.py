@@ -30,6 +30,15 @@ class ProcurementRecord(Base, TimestampMixin):
         comment="Reference to parent project (NULL until entity resolution in Sprint 3)",
     )
 
+    # Foreign Key to Investigation (set for targeted-mode ingestion)
+    investigation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("investigations.investigation_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="Investigation that created this record (NULL for bulk scrapes)",
+    )
+
     # Source Information
     source_system = Column(
         String(50),
