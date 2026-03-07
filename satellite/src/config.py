@@ -50,9 +50,15 @@ class Config:
     # ========================================================================
     # AWS Configuration
     # ========================================================================
-    AWS_ACCESS_KEY_ID: Optional[str] = os.getenv("AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY: Optional[str] = os.getenv("AWS_SECRET_ACCESS_KEY")
-    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+    # Use `or None` so that a blank env var (AWS_ACCESS_KEY_ID=) is stored as
+    # None, not "". boto3's StaticProvider skips None and falls through to the
+    # credential chain (env vars → ~/.aws/credentials → IAM role). An explicit
+    # empty string would behave inconsistently across boto3 versions.
+    AWS_ACCESS_KEY_ID: Optional[str] = os.getenv("AWS_ACCESS_KEY_ID") or None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = os.getenv("AWS_SECRET_ACCESS_KEY") or None
+    # None → boto3 reads region from ~/.aws/config; only falls back to
+    # "us-east-1" if no region is configured anywhere in the chain.
+    AWS_REGION: Optional[str] = os.getenv("AWS_REGION") or None
     S3_BUCKET: str = os.getenv("S3_BUCKET", "oneka-satellite-data")
 
     # ========================================================================

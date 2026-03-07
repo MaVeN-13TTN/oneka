@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # AWS Configuration
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
-    aws_region: str = "us-east-1"
+    aws_region: Optional[str] = None
     aws_s3_bucket: Optional[str] = None
 
     # External APIs

@@ -34,11 +34,14 @@ class S3StorageService:
 
         # Initialize S3 client
         try:
+            # Pass credentials explicitly only when present.
+            # Empty string or None means: fall through to boto3's credential
+            # chain (env vars → ~/.aws/credentials → IAM instance role).
             self.s3_client = boto3.client(
                 "s3",
-                aws_access_key_id=settings.aws_access_key_id,
-                aws_secret_access_key=settings.aws_secret_access_key,
-                region_name=settings.aws_region,
+                aws_access_key_id=settings.aws_access_key_id or None,
+                aws_secret_access_key=settings.aws_secret_access_key or None,
+                region_name=settings.aws_region or None,
             )
             logger.info(f"S3 client initialized for bucket: {self.bucket_name}")
         except NoCredentialsError:
