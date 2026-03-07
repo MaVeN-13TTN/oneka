@@ -58,7 +58,7 @@ def _is_token_valid(token_hash: str) -> bool:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-@router.post("/maps/tiles/session", tags=["Maps"])
+@router.post("/maps/tiles/session")
 @limiter.limit("5/minute")
 async def create_session(request: Request, db: Session = Depends(get_db)):
     """
@@ -159,7 +159,7 @@ async def create_session(request: Request, db: Session = Depends(get_db)):
 # ────────────────────────────────────────────────────────────────────────────
 
 
-@router.get("/maps/tiles/{session_token}/{z}/{x}/{y}", tags=["Maps"])
+@router.get("/maps/tiles/{session_token}/{z}/{x}/{y}")
 @limiter.limit("60/minute")
 async def proxy_tile(request: Request, session_token: str, z: int, x: int, y: int):
     """

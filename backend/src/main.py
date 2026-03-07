@@ -4,6 +4,7 @@ FastAPI application entry point.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -20,9 +21,19 @@ app = FastAPI(
     description="Kenya's First Autonomous Infrastructure Auditing Platform - Backend API",
     version=settings.api_version,
     docs_url="/docs",
-    redoc_url="/redoc",
+    redoc_url=None,  # Disable built-in; custom route below uses a working CDN URL
     openapi_url="/openapi.json",
 )
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_html():
+    """Serve ReDoc with a pinned CDN URL (the default @next tag 404s)."""
+    return get_redoc_html(
+        openapi_url=app.openapi_url,
+        title=f"{settings.app_name} - ReDoc",
+        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2.1.5/bundles/redoc.standalone.js",
+    )
 
 # Rate limiting
 app.state.limiter = limiter

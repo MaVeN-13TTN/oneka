@@ -31,7 +31,7 @@ router = APIRouter()
 # ── GET /risk/score/{project_uuid} ────────────────────────────────────────────
 
 
-@router.get("/risk/score/{project_uuid}", tags=["Risk Scoring"])
+@router.get("/risk/score/{project_uuid}")
 def get_risk_score(project_uuid: UUID, db: Session = Depends(get_db)):
     """
     Return the ML ghost probability and feature breakdown for a project.
@@ -86,7 +86,7 @@ def get_risk_score(project_uuid: UUID, db: Session = Depends(get_db)):
 # ── GET /risk/heat-map ────────────────────────────────────────────────────────
 
 
-@router.get("/risk/heat-map", tags=["Risk Scoring"])
+@router.get("/risk/heat-map")
 def get_risk_heat_map(
     risk_level: Optional[str] = Query(
         default=None,

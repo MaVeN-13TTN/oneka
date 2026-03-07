@@ -14,7 +14,7 @@ from src.config import settings
 router = APIRouter()
 
 
-@router.get("/health", tags=["Health"])
+@router.get("/health")
 async def health_check():
     """
     Basic health check endpoint.
@@ -31,7 +31,7 @@ async def health_check():
     }
 
 
-@router.get("/health/db", tags=["Health"])
+@router.get("/health/db")
 async def database_health(db: Session = Depends(get_db)):
     """
     Check database connectivity and PostGIS extension.
@@ -77,7 +77,7 @@ async def database_health(db: Session = Depends(get_db)):
         )
 
 
-@router.get("/status", tags=["Health"])
+@router.get("/status")
 async def system_status(db: Session = Depends(get_db)):
     """
     Comprehensive system status with record counts.
@@ -154,7 +154,7 @@ async def system_status(db: Session = Depends(get_db)):
         }
 
 
-@router.get("/ping", tags=["Health"])
+@router.get("/ping")
 async def ping():
     """
     Simple ping endpoint for load balancer health checks.
