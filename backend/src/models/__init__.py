@@ -9,6 +9,7 @@ from src.models.geolocation import GeolocationRecord
 from src.models.financial import FinancialRecord
 from src.models.satellite import SatelliteAnalysis
 from src.models.admin_boundary import AdminBoundary
+from src.models.investigation import Investigation, InvestigationStatus
 
 __all__ = [
     "Base",
@@ -21,4 +22,6 @@ __all__ = [
     "FinancialRecord",
     "SatelliteAnalysis",
     "AdminBoundary",
+    "Investigation",
+    "InvestigationStatus",
 ]
