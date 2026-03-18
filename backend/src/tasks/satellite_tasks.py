@@ -43,15 +43,36 @@ from src.services.divergence_service import DivergenceService
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 def _require_copernicus_downloader():
-    """Lazy import — raises ImportError with clear message if unavailable."""
+    """Lazy import — raises ImportError with clear message if unavailable.
+
+    Uses a sys.modules swap to resolve the naming conflict between
+    backend/src/ (already loaded as 'src') and satellite/src/.
+    The swap is fully reversed in the finally block so backend modules
+    are unaffected after this call.
+    """
+    _sat_path = str(_REPO_ROOT / "satellite")
+    # Snapshot every 'src.*' key currently in sys.modules (backend package)
+    _saved = {k: v for k, v in sys.modules.items()
+              if k == "src" or k.startswith("src.")}
+    # Remove them so Python can discover satellite/src/ as 'src'
+    for k in _saved:
+        del sys.modules[k]
+    if _sat_path not in sys.path:
+        sys.path.insert(0, _sat_path)
     try:
-        from src.download import CopernicusDownloader  # satellite venv path
+        from src.download import CopernicusDownloader  # now satellite/src/download.py
         return CopernicusDownloader
     except ImportError as exc:
         raise ImportError(
             "CopernicusDownloader not available.  "
             "Ensure the satellite venv is active and sentinelsat is installed."
         ) from exc
+    finally:
+        # Remove satellite 'src.*' entries just loaded
+        for k in [k for k in sys.modules if k == "src" or k.startswith("src.")]:
+            del sys.modules[k]
+        # Restore original backend 'src.*' modules
+        sys.modules.update(_saved)
 
 
 # ─── tasks ───────────────────────────────────────────────────────────────────

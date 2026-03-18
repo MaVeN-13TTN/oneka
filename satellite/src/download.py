@@ -1,19 +1,24 @@
 """
 Copernicus Data Space API client for downloading Sentinel-1 and Sentinel-2 imagery.
 
-This module handles authentication and download of satellite scenes from the
-Copernicus Data Space Ecosystem.
+Uses OAuth2 Bearer-token authentication against the CDSE OData API.
+SentinelAPI (basic auth) was dropped because the CDSE catalogue requires
+OAuth2 since early 2024.
+
+Auth flow:
+  POST  https://identity.dataspace.copernicus.eu/…/token  → access_token (10 min TTL)
+  GET   https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=…  → scene list
+  GET   https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value   → zip stream
 """
 
-import json
+import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import requests
 from loguru import logger
-from sentinelsat import SentinelAPI, read_geojson, geojson_to_wkt
-from tqdm import tqdm
 
 from src.config import config
 from src.utils import (
@@ -24,10 +29,22 @@ from src.utils import (
     ensure_directory,
 )
 
+# CDSE OData endpoints
+_CATALOGUE = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
+_ZIPPER = "https://zipper.dataspace.copernicus.eu/odata/v1/Products"
+
+# OAuth2 client for public CDSE access
+_CLIENT_ID = "cdse-public"
+
 
 class CopernicusDownloader:
     """
     Client for downloading Sentinel satellite imagery from Copernicus Data Space.
+
+    Supports two OAuth2 auth flows (auto-detected from .env):
+      1. client_credentials — preferred; uses COPERNICUS_CLIENT_ID + CLIENT_SECRET
+      2. password (ROPC)    — fallback; uses COPERNICUS_USERNAME + PASSWORD
+    The access token is cached and automatically refreshed before expiry.
     """
 
     def __init__(
@@ -35,30 +52,77 @@ class CopernicusDownloader:
         username: Optional[str] = None,
         password: Optional[str] = None,
     ):
-        """
-        Initialize Copernicus downloader.
-
-        Args:
-            username: Copernicus Data Space username
-            password: Copernicus Data Space password
-        """
         self.username = username or config.COPERNICUS_USERNAME
         self.password = password or config.COPERNICUS_PASSWORD
+        self._client_id = config.COPERNICUS_CLIENT_ID
+        self._client_secret = config.COPERNICUS_CLIENT_SECRET
 
-        if not self.username or not self.password:
+        # Require at least one auth method
+        has_client_creds = bool(self._client_id and self._client_secret)
+        has_password = bool(self.username and self.password)
+        if not has_client_creds and not has_password:
             raise ValueError(
-                "Copernicus credentials not provided. "
-                "Set COPERNICUS_USERNAME and COPERNICUS_PASSWORD in .env"
+                "No Copernicus credentials found. Set either "
+                "COPERNICUS_CLIENT_ID + COPERNICUS_CLIENT_SECRET "
+                "or COPERNICUS_USERNAME + COPERNICUS_PASSWORD in .env"
             )
 
-        # Initialize SentinelAPI client
-        self.api = SentinelAPI(
-            self.username,
-            self.password,
-            "https://catalogue.dataspace.copernicus.eu/resto",
-        )
+        self._use_client_creds = has_client_creds
+
+        self._token: Optional[str] = None
+        self._token_expires_at: float = 0.0
+        self._refresh_token()
 
         logger.info("Copernicus API client initialized")
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+
+    def _refresh_token(self) -> None:
+        """Fetch a new OAuth2 access token and cache its expiry time.
+
+        Tries client_credentials grant first when a dedicated OAuth client is
+        configured; falls back to resource-owner password grant if it fails or
+        if no client credentials are set.
+        """
+        if self._use_client_creds:
+            payload = {
+                "grant_type": "client_credentials",
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+            }
+            resp = requests.post(config.COPERNICUS_TOKEN_URL, data=payload, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                self._token = data["access_token"]
+                self._token_expires_at = time.time() + data.get("expires_in", 600) - 60
+                return
+            # client_credentials rejected — try password grant as fallback
+            logger.warning(
+                "client_credentials grant failed (%s) — falling back to password grant",
+                resp.status_code,
+            )
+            if not (self.username and self.password):
+                resp.raise_for_status()  # no fallback available; surface the error
+
+        payload = {
+            "grant_type": "password",
+            "username": self.username,
+            "password": self.password,
+            "client_id": _CLIENT_ID,
+        }
+        resp = requests.post(config.COPERNICUS_TOKEN_URL, data=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        self._token = data["access_token"]
+        self._token_expires_at = time.time() + data.get("expires_in", 600) - 60
+
+    def _auth_headers(self) -> Dict[str, str]:
+        """Return Authorization header, refreshing the token if near expiry."""
+        if time.time() >= self._token_expires_at:
+            self._refresh_token()
+        return {"Authorization": f"Bearer {self._token}"}
+
+    # ── Search ────────────────────────────────────────────────────────────────
 
     def search_sentinel2(
         self,
@@ -70,64 +134,63 @@ class CopernicusDownloader:
         product_type: str = "S2MSI2A",
     ) -> List[Dict]:
         """
-        Search for Sentinel-2 scenes.
+        Search for Sentinel-2 scenes via the CDSE OData API.
 
         Args:
-            lat: Center latitude
-            lon: Center longitude
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
-            max_cloud_cover: Maximum cloud cover percentage (0-100)
-            product_type: Product type (S2MSI2A for Level-2A)
+            lat: Centre latitude.
+            lon: Centre longitude.
+            start_date: Search window start (YYYY-MM-DD).
+            end_date: Search window end (YYYY-MM-DD).
+            max_cloud_cover: Maximum cloud cover percentage (0-100).
+            product_type: Sentinel-2 product type (default S2MSI2A = Level-2A).
 
         Returns:
-            List of scene metadata dictionaries
+            List of scene metadata dicts, sorted most-recent first.
         """
         logger.info(f"Searching Sentinel-2 scenes for ({lat}, {lon})")
-        logger.info(f"Date range: {start_date} to {end_date}")
-        logger.info(f"Max cloud cover: {max_cloud_cover}%")
+        logger.info(f"Date range: {start_date} to {end_date}, max cloud: {max_cloud_cover}%")
 
-        # Validate inputs
         parse_coordinates(lat, lon)
         start_dt, end_dt = validate_date_range(start_date, end_date)
 
-        # Create bounding box (500m radius)
         bbox = create_bbox(lat, lon, radius_m=config.AOI_RADIUS)
-        footprint = f"POLYGON(({bbox[0]} {bbox[1]}, {bbox[2]} {bbox[1]}, {bbox[2]} {bbox[3]}, {bbox[0]} {bbox[3]}, {bbox[0]} {bbox[1]}))"
+        footprint = (
+            f"POLYGON(({bbox[0]} {bbox[1]}, {bbox[2]} {bbox[1]}, "
+            f"{bbox[2]} {bbox[3]}, {bbox[0]} {bbox[3]}, {bbox[0]} {bbox[1]}))"
+        )
 
-        # Search API
+        odata_filter = (
+            f"Collection/Name eq 'SENTINEL-2' and "
+            f"Attributes/OData.CSC.StringAttribute/any("
+            f"  att:att/Name eq 'productType' and "
+            f"  att/OData.CSC.StringAttribute/Value eq '{product_type}') and "
+            f"Attributes/OData.CSC.DoubleAttribute/any("
+            f"  att:att/Name eq 'cloudCover' and "
+            f"  att/OData.CSC.DoubleAttribute/Value le {float(max_cloud_cover)}) and "
+            f"ContentDate/Start gt {start_dt.strftime('%Y-%m-%dT00:00:00.000Z')} and "
+            f"ContentDate/Start lt {end_dt.strftime('%Y-%m-%dT23:59:59.000Z')} and "
+            f"OData.CSC.Intersects(area=geography'SRID=4326;{footprint}')"
+        )
+
         try:
-            products = self.api.query(
-                area=footprint,
-                date=(start_dt, end_dt),
-                platformname="Sentinel-2",
-                producttype=product_type,
-                cloudcoverpercentage=(0, max_cloud_cover),
+            resp = requests.get(
+                _CATALOGUE,
+                params={
+                    "$filter": odata_filter,
+                    "$orderby": "ContentDate/Start desc",
+                    "$top": 10,
+                    "$expand": "Attributes",
+                },
+                headers=self._auth_headers(),
+                timeout=60,
             )
-
+            resp.raise_for_status()
+            products = resp.json().get("value", [])
             logger.info(f"Found {len(products)} Sentinel-2 scenes")
+            return [self._normalise_s2(p) for p in products]
 
-            # Convert to list of dictionaries
-            scenes = []
-            for uuid, product in products.items():
-                scenes.append(
-                    {
-                        "uuid": uuid,
-                        "title": product["title"],
-                        "sensing_date": product["beginposition"].strftime("%Y-%m-%d"),
-                        "cloud_cover": product["cloudcoverpercentage"],
-                        "size_mb": product["size"].split()[0],
-                        "product_type": product["producttype"],
-                    }
-                )
-
-            # Sort by date (most recent first)
-            scenes.sort(key=lambda x: x["sensing_date"], reverse=True)
-
-            return scenes
-
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
+        except Exception as exc:
+            logger.error(f"Sentinel-2 search failed: {exc}")
             return []
 
     def search_sentinel1(
@@ -140,62 +203,62 @@ class CopernicusDownloader:
         polarization: str = "VV VH",
     ) -> List[Dict]:
         """
-        Search for Sentinel-1 SAR scenes.
+        Search for Sentinel-1 SAR scenes via the CDSE OData API.
 
         Args:
-            lat: Center latitude
-            lon: Center longitude
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
-            product_type: Product type (GRD, SLC)
-            polarization: Polarization mode (VV VH, HH HV)
+            lat: Centre latitude.
+            lon: Centre longitude.
+            start_date: Search window start (YYYY-MM-DD).
+            end_date: Search window end (YYYY-MM-DD).
+            product_type: Product type (GRD or SLC).
+            polarization: Ignored (filter removed for broader coverage).
 
         Returns:
-            List of scene metadata dictionaries
+            List of scene metadata dicts, sorted most-recent first.
         """
         logger.info(f"Searching Sentinel-1 scenes for ({lat}, {lon})")
-        logger.info(f"Date range: {start_date} to {end_date}")
 
-        # Validate inputs
         parse_coordinates(lat, lon)
         start_dt, end_dt = validate_date_range(start_date, end_date)
 
-        # Create bounding box
         bbox = create_bbox(lat, lon, radius_m=config.AOI_RADIUS)
-        footprint = f"POLYGON(({bbox[0]} {bbox[1]}, {bbox[2]} {bbox[1]}, {bbox[2]} {bbox[3]}, {bbox[0]} {bbox[3]}, {bbox[0]} {bbox[1]}))"
+        footprint = (
+            f"POLYGON(({bbox[0]} {bbox[1]}, {bbox[2]} {bbox[1]}, "
+            f"{bbox[2]} {bbox[3]}, {bbox[0]} {bbox[3]}, {bbox[0]} {bbox[1]}))"
+        )
 
-        # Search API
+        odata_filter = (
+            f"Collection/Name eq 'SENTINEL-1' and "
+            f"Attributes/OData.CSC.StringAttribute/any("
+            f"  att:att/Name eq 'productType' and "
+            f"  att/OData.CSC.StringAttribute/Value eq '{product_type}') and "
+            f"ContentDate/Start gt {start_dt.strftime('%Y-%m-%dT00:00:00.000Z')} and "
+            f"ContentDate/Start lt {end_dt.strftime('%Y-%m-%dT23:59:59.000Z')} and "
+            f"OData.CSC.Intersects(area=geography'SRID=4326;{footprint}')"
+        )
+
         try:
-            products = self.api.query(
-                area=footprint,
-                date=(start_dt, end_dt),
-                platformname="Sentinel-1",
-                producttype=product_type,
-                polarisationmode=polarization,
+            resp = requests.get(
+                _CATALOGUE,
+                params={
+                    "$filter": odata_filter,
+                    "$orderby": "ContentDate/Start desc",
+                    "$top": 5,
+                    "$expand": "Attributes",
+                },
+                headers=self._auth_headers(),
+                timeout=60,
             )
-
+            resp.raise_for_status()
+            products = resp.json().get("value", [])
             logger.info(f"Found {len(products)} Sentinel-1 scenes")
+            return [self._normalise_s1(p) for p in products]
 
-            scenes = []
-            for uuid, product in products.items():
-                scenes.append(
-                    {
-                        "uuid": uuid,
-                        "title": product["title"],
-                        "sensing_date": product["beginposition"].strftime("%Y-%m-%d"),
-                        "polarization": product.get("polarisationmode", "N/A"),
-                        "size_mb": product["size"].split()[0],
-                        "product_type": product["producttype"],
-                    }
-                )
-
-            scenes.sort(key=lambda x: x["sensing_date"], reverse=True)
-
-            return scenes
-
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
+        except Exception as exc:
+            logger.error(f"Sentinel-1 search failed: {exc}")
             return []
+
+    # ── Download ──────────────────────────────────────────────────────────────
 
     def download_scene(
         self,
@@ -204,60 +267,61 @@ class CopernicusDownloader:
         unzip: bool = True,
     ) -> Optional[Path]:
         """
-        Download a satellite scene by UUID.
+        Download a satellite scene by its CDSE product UUID.
 
         Args:
-            uuid: Scene UUID from search results
-            output_dir: Output directory
-            unzip: Whether to unzip SAFE archive
+            uuid: CDSE product UUID from search results.
+            output_dir: Destination directory.
+            unzip: Unzip the downloaded SAFE zip archive.
 
         Returns:
-            Path to downloaded scene (or None if failed)
+            Path to the SAFE directory (if unzip=True) or zip file, or None on failure.
         """
         logger.info(f"Downloading scene: {uuid}")
-
-        # Ensure output directory exists
         ensure_directory(output_dir)
 
+        zip_dest = output_dir / f"{uuid}.zip"
+
         try:
-            # Download scene
-            self.api.download(uuid, directory_path=str(output_dir))
+            # CDSE zipper streams the SAFE archive as a zip
+            download_url = f"{_ZIPPER}({uuid})/$value"
+            with requests.get(
+                download_url,
+                headers=self._auth_headers(),
+                stream=True,
+                allow_redirects=True,
+                timeout=600,
+            ) as resp:
+                resp.raise_for_status()
 
-            # Find downloaded file
-            downloaded_file = None
-            for file_path in output_dir.glob("*.zip"):
-                if uuid in file_path.name or file_path.stem in uuid:
-                    downloaded_file = file_path
-                    break
+                total = int(resp.headers.get("content-length", 0))
+                received = 0
+                with open(zip_dest, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
+                        fh.write(chunk)
+                        received += len(chunk)
 
-            if not downloaded_file:
-                logger.error(f"Downloaded file not found for UUID: {uuid}")
-                return None
+            logger.info(f"Downloaded: {zip_dest.name} ({format_file_size(received)})")
 
-            logger.info(f"Downloaded: {downloaded_file.name}")
-            logger.info(f"Size: {format_file_size(downloaded_file.stat().st_size)}")
+            if not unzip:
+                return zip_dest
 
-            # Unzip if requested
-            if unzip:
-                logger.info("Extracting SAFE archive...")
-                import zipfile
+            logger.info("Extracting SAFE archive…")
+            with zipfile.ZipFile(zip_dest, "r") as zf:
+                zf.extractall(output_dir)
 
-                with zipfile.ZipFile(downloaded_file, "r") as zip_ref:
-                    zip_ref.extractall(output_dir)
+            # The SAFE directory shares its stem with the zip
+            safe_candidates = list(output_dir.glob("*.SAFE"))
+            if safe_candidates:
+                safe_dir = safe_candidates[0]
+                logger.info(f"Extracted to: {safe_dir.name}")
+                return safe_dir
 
-                # Find extracted SAFE directory
-                safe_dir = output_dir / downloaded_file.stem
-                if safe_dir.exists():
-                    logger.info(f"Extracted to: {safe_dir.name}")
-                    return safe_dir
-                else:
-                    logger.warning("SAFE directory not found after extraction")
-                    return downloaded_file
-            else:
-                return downloaded_file
+            logger.warning("SAFE directory not found after extraction")
+            return zip_dest
 
-        except Exception as e:
-            logger.error(f"Download failed: {e}")
+        except Exception as exc:
+            logger.error(f"Download failed for {uuid}: {exc}")
             return None
 
     def download_multiple(
@@ -266,125 +330,85 @@ class CopernicusDownloader:
         output_dir: Path,
         max_scenes: int = 5,
     ) -> List[Path]:
-        """
-        Download multiple scenes.
-
-        Args:
-            scenes: List of scene dictionaries from search
-            output_dir: Output directory
-            max_scenes: Maximum number of scenes to download
-
-        Returns:
-            List of downloaded scene paths
-        """
+        """Download multiple scenes, stopping at max_scenes."""
         downloaded = []
-
         for i, scene in enumerate(scenes[:max_scenes]):
-            logger.info(f"Downloading scene {i+1}/{min(len(scenes), max_scenes)}")
-            logger.info(f"  Title: {scene['title']}")
-            logger.info(f"  Date: {scene['sensing_date']}")
-
-            scene_path = self.download_scene(
-                uuid=scene["uuid"],
-                output_dir=output_dir,
-                unzip=True,
-            )
-
-            if scene_path:
-                downloaded.append(scene_path)
-
-        logger.info(f"Downloaded {len(downloaded)}/{max_scenes} scenes successfully")
-
+            logger.info(f"Downloading scene {i+1}/{min(len(scenes), max_scenes)}: {scene['title']}")
+            path = self.download_scene(scene["uuid"], output_dir, unzip=True)
+            if path:
+                downloaded.append(path)
+        logger.info(f"Downloaded {len(downloaded)}/{min(len(scenes), max_scenes)} scenes")
         return downloaded
+
+    # ── Internal normalisation ────────────────────────────────────────────────
+
+    @staticmethod
+    def _attr(product: Dict, name: str, default=None):
+        """Pull a named attribute value from an OData product's Attributes list."""
+        for attr in product.get("Attributes", []):
+            if attr.get("Name") == name:
+                return attr.get("Value", default)
+        return default
+
+    def _normalise_s2(self, product: Dict) -> Dict:
+        sensing_date = product.get("ContentDate", {}).get("Start", "")[:10]
+        return {
+            "uuid": product["Id"],
+            "title": product["Name"],
+            "sensing_date": sensing_date,
+            "cloud_cover": self._attr(product, "cloudCover", 0),
+            "size_mb": str(round(product.get("ContentLength", 0) / 1e6, 1)),
+            "product_type": self._attr(product, "productType", "S2MSI2A"),
+        }
+
+    def _normalise_s1(self, product: Dict) -> Dict:
+        sensing_date = product.get("ContentDate", {}).get("Start", "")[:10]
+        return {
+            "uuid": product["Id"],
+            "title": product["Name"],
+            "sensing_date": sensing_date,
+            "polarization": self._attr(product, "polarisationChannels", "N/A"),
+            "size_mb": str(round(product.get("ContentLength", 0) / 1e6, 1)),
+            "product_type": self._attr(product, "productType", "GRD"),
+        }
 
 
 def main():
-    """
-    Command-line interface for satellite data download.
-    """
+    """CLI wrapper for ad-hoc scene searches and downloads."""
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Download Sentinel satellite imagery from Copernicus Data Space"
     )
-
-    parser.add_argument("--lat", type=float, required=True, help="Center latitude")
-    parser.add_argument("--lon", type=float, required=True, help="Center longitude")
-    parser.add_argument(
-        "--start-date", type=str, required=True, help="Start date (YYYY-MM-DD)"
-    )
-    parser.add_argument(
-        "--end-date", type=str, required=True, help="End date (YYYY-MM-DD)"
-    )
-    parser.add_argument(
-        "--sensor",
-        type=str,
-        choices=["sentinel-1", "sentinel-2"],
-        default="sentinel-2",
-        help="Satellite sensor",
-    )
-    parser.add_argument(
-        "--max-cloud", type=int, default=20, help="Max cloud cover for Sentinel-2 (%)"
-    )
-    parser.add_argument(
-        "--max-scenes", type=int, default=5, help="Maximum scenes to download"
-    )
-    parser.add_argument("--output", type=str, default=None, help="Output directory")
+    parser.add_argument("--lat", type=float, required=True)
+    parser.add_argument("--lon", type=float, required=True)
+    parser.add_argument("--start-date", type=str, required=True)
+    parser.add_argument("--end-date", type=str, required=True)
+    parser.add_argument("--sensor", choices=["sentinel-1", "sentinel-2"], default="sentinel-2")
+    parser.add_argument("--max-cloud", type=int, default=20)
+    parser.add_argument("--max-scenes", type=int, default=5)
+    parser.add_argument("--output", type=str, default=None)
 
     args = parser.parse_args()
 
-    # Set up output directory
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        output_dir = config.RAW_DATA_DIR / f"{args.sensor}_{args.start_date}"
+    output_dir = Path(args.output) if args.output else config.RAW_DATA_DIR / f"{args.sensor}_{args.start_date}"
 
-    # Initialize downloader
     downloader = CopernicusDownloader()
 
-    # Search for scenes
     if args.sensor == "sentinel-2":
-        scenes = downloader.search_sentinel2(
-            lat=args.lat,
-            lon=args.lon,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            max_cloud_cover=args.max_cloud,
-        )
+        scenes = downloader.search_sentinel2(args.lat, args.lon, args.start_date, args.end_date, args.max_cloud)
     else:
-        scenes = downloader.search_sentinel1(
-            lat=args.lat,
-            lon=args.lon,
-            start_date=args.start_date,
-            end_date=args.end_date,
-        )
+        scenes = downloader.search_sentinel1(args.lat, args.lon, args.start_date, args.end_date)
 
     if not scenes:
         logger.error("No scenes found matching criteria")
         return
 
-    # Display search results
-    logger.info(f"\nFound {len(scenes)} scenes:")
-    for i, scene in enumerate(scenes[: args.max_scenes]):
-        logger.info(f"  {i+1}. {scene['title']}")
-        logger.info(f"     Date: {scene['sensing_date']}")
-        if "cloud_cover" in scene:
-            logger.info(f"     Cloud: {scene['cloud_cover']}%")
-        logger.info(f"     Size: {scene['size_mb']} MB")
-
-    # Download scenes
-    logger.info(f"\nDownloading to: {output_dir}")
-    downloaded = downloader.download_multiple(
-        scenes=scenes,
-        output_dir=output_dir,
-        max_scenes=args.max_scenes,
-    )
-
-    logger.info(f"\n✅ Downloaded {len(downloaded)} scenes")
+    logger.info(f"Found {len(scenes)} scenes")
+    downloader.download_multiple(scenes, output_dir, args.max_scenes)
 
 
 if __name__ == "__main__":
     from src.utils import setup_logger
-
     setup_logger(level=config.LOG_LEVEL)
     main()

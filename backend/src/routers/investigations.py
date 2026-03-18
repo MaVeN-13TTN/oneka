@@ -5,6 +5,7 @@ POST   /api/v1/investigations                      — create a new investigatio
 POST   /api/v1/investigations/{id}/enrich          — enrich with Perplexity
 PATCH  /api/v1/investigations/{id}/context         — user corrections to context
 POST   /api/v1/investigations/{id}/scrape          — trigger full pipeline
+POST   /api/v1/investigations/{id}/reparse-cob    — re-run COB Vision parsing on cached PDFs
 GET    /api/v1/investigations/{id}/status          — poll pipeline stage statuses
 GET    /api/v1/investigations/{id}/report          — fetch full investigation report
 """
@@ -309,7 +310,34 @@ async def trigger_investigation_scrape(
     )
 
 
-# ── Report ─────────────────────────────────────────────────────────────────────
+@router.post(
+    "/investigations/{investigation_id}/reparse-cob",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-run COB Vision parsing on cached PDFs",
+    description=(
+        "Re-processes all cached COB BIRR PDFs for this investigation through "
+        "IntelligentCoBParser (GPT-4o Vision) without re-downloading.  "
+        "Use this to recover financial records after a failed pipeline run."
+    ),
+)
+@limiter.limit("5/hour")
+async def reparse_cob(
+    request: Request,
+    investigation_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """Enqueue reparse_cob_task for already-cached COB PDFs."""
+    _get_investigation_or_404(investigation_id, db)
+
+    from src.tasks.ingestion_tasks import reparse_cob_task
+
+    result = reparse_cob_task.delay(str(investigation_id))
+    logger.info("Investigation %s reparse-cob enqueued — task_id=%s", investigation_id, result.id)
+    return {
+        "investigation_id": str(investigation_id),
+        "task_id": result.id,
+        "detail": "COB reparse enqueued",
+    }
 
 
 @router.get(

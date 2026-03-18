@@ -16,6 +16,7 @@ Requires:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -74,8 +75,11 @@ class IntelligentCoBParser:
     Stage 2: OpenAI GPT-4o Vision extraction (targeted, context-aware).
     """
 
-    DPI: int = 200        # resolution for page rendering
+    DPI: int = 150        # 150 DPI is sufficient for table text; reduces image size vs 200
     MAX_PAGES: int = 300  # safety cap on pages scanned in Stage 1
+    # Max concurrent Vision API calls per PDF.  8 keeps us well under the
+    # 500 RPM limit even when multiple PDFs are parsed in parallel.
+    VISION_CONCURRENCY: int = 8
 
     def __init__(
         self,
@@ -97,10 +101,15 @@ class IntelligentCoBParser:
 
     async def extract(self) -> list[dict]:
         """
-        Full two-stage extraction.
+        Full two-stage extraction with parallel Vision calls.
 
-        Returns a list of FinancialRecord-compatible dicts — one per
-        successfully matched page. Empty list if no matches found.
+        Stage 1 (sync): pdfplumber keyword scan — scores and ranks pages.
+        Stage 2 (async, parallel): up to VISION_CONCURRENCY pages are
+        rendered and sent to GPT-4o Vision simultaneously via
+        asyncio.gather().  Page rendering runs in a thread-pool so it
+        does not block the event loop.
+
+        Returns a list of FinancialRecord-compatible dicts.
         """
         candidate_pages = self._select_candidates()
         if not candidate_pages:
@@ -109,45 +118,45 @@ class IntelligentCoBParser:
             )
             return []
 
+        pages_to_process = candidate_pages[: self.max_vision_pages]
         logger.info(
             f"IntelligentCoBParser: {len(candidate_pages)} candidate page(s) found, "
-            f"sending up to {self.max_vision_pages} to Vision"
+            f"sending up to {len(pages_to_process)} to Vision "
+            f"(concurrency={self.VISION_CONCURRENCY})"
         )
 
-        results: list[dict] = []
-        for page_num in candidate_pages[: self.max_vision_pages]:
-            # Cost guard: stop before issuing the next Vision request if the
-            # per-investigation cap has been reached.
-            if (
-                self.cost_limit_usd is not None
-                and self.total_cost_usd >= self.cost_limit_usd
-            ):
-                logger.warning(
-                    f"IntelligentCoBParser: Vision cost limit "
-                    f"${self.cost_limit_usd:.4f} reached after "
-                    f"{self.pages_processed} page(s) "
-                    f"(spend=${self.total_cost_usd:.4f}). Stopping early."
-                )
-                break
+        sem = asyncio.Semaphore(self.VISION_CONCURRENCY)
 
-            try:
-                img_bytes = self._render_page(page_num)
-            except Exception as exc:
-                logger.warning(
-                    f"IntelligentCoBParser: failed to render page {page_num}: {exc}"
-                )
-                continue
+        async def _process_one(page_num: int) -> dict | None:
+            async with sem:
+                # Best-effort cost guard — checked before each slot is consumed.
+                if (
+                    self.cost_limit_usd is not None
+                    and self.total_cost_usd >= self.cost_limit_usd
+                ):
+                    logger.warning(
+                        f"IntelligentCoBParser: cost cap ${self.cost_limit_usd:.2f} "
+                        f"reached (spent=${self.total_cost_usd:.4f}), skipping page {page_num}"
+                    )
+                    return None
+                try:
+                    # _render_page is CPU/IO-bound (poppler); run in thread pool
+                    img_bytes = await asyncio.to_thread(self._render_page, page_num)
+                except Exception as exc:
+                    logger.warning(
+                        f"IntelligentCoBParser: failed to render page {page_num}: {exc}"
+                    )
+                    return None
+                try:
+                    return await self._vision_extract(page_num, img_bytes)
+                except Exception as exc:
+                    logger.warning(
+                        f"IntelligentCoBParser: Vision API failed on page {page_num}: {exc}"
+                    )
+                    return None
 
-            try:
-                record = await self._vision_extract(page_num, img_bytes)
-            except Exception as exc:
-                logger.warning(
-                    f"IntelligentCoBParser: Vision API failed on page {page_num}: {exc}"
-                )
-                continue
-
-            if record:
-                results.append(record)
+        raw_results = await asyncio.gather(*(_process_one(p) for p in pages_to_process))
+        results = [r for r in raw_results if r is not None]
 
         logger.info(
             f"IntelligentCoBParser: extracted {len(results)} record(s) from {self.pdf_path} "

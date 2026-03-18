@@ -28,9 +28,26 @@ class CoBPoller:
     async def find_reports(self):
         """
         Scrapes the reports page for PDF links using Playwright to handle JS redirects.
+
+        Returns a list of dicts:
+            {"title": str, "url": str, "report_type": "annual" | "quarterly"}
+
+        "annual" reports cover a full fiscal year (preferred for IntelligentCoBParser).
+        "quarterly" reports are kept as fallback in case no annual report exists yet.
         """
         from playwright.async_api import async_playwright
         import re
+
+        _QUARTERLY_MARKERS = (
+            "quarter", "nine-months", "first-half", "second-half",
+            "-q1-", "-q2-", "-q3-", "-q4-",
+        )
+
+        def _report_type(url: str) -> str:
+            u = url.lower()
+            if any(m in u for m in _QUARTERLY_MARKERS):
+                return "quarterly"
+            return "annual"
 
         report_links = []
         try:
@@ -38,18 +55,14 @@ class CoBPoller:
                 print("Launching browser for CoB...")
                 browser = await p.chromium.launch(headless=True)
                 page = await browser.new_page()
-                
+
                 print(f"Navigating to {self.REPORTS_URL}...")
-                # Increase timeout as CoB is slow
                 await page.goto(self.REPORTS_URL, timeout=120000, wait_until="domcontentloaded")
-                
-                # Extract links via JS
-                # Logic: Find .wpdm-download-link, get onclick/data-downloadurl, checks text in parent
+
                 links_data = await page.evaluate("""() => {
                     return Array.from(document.querySelectorAll('a.wpdm-download-link')).map(a => {
                         const titleParent = a.closest('.wpdm-link-template') || a.parentElement;
                         const text = titleParent ? titleParent.innerText.trim() : a.innerText.trim();
-                        // Get all attributes for debugging
                         const attrs = {};
                         for (let i = 0; i < a.attributes.length; i++) {
                             attrs[a.attributes[i].name] = a.attributes[i].value;
@@ -64,39 +77,36 @@ class CoBPoller:
                         };
                     });
                 }""")
-                
+
                 await browser.close()
-                
                 print(f"Found {len(links_data)} potential download links.")
 
                 for item in links_data:
                     text = item['text']
                     url = None
-                    
-                    # Extract URL from onclick
+
                     if item.get('onclick'):
                         match = re.search(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", item['onclick'])
                         if match:
                             url = match.group(1)
-                    
-                    # Fallback to data-downloadurl or href
+
                     if not url:
-                        url = item.get('dataUrl') or (item.get('href') if 'wpdmdl' in str(item.get('href')) else None)
+                        url = item.get('dataUrl') or (
+                            item.get('href') if 'wpdmdl' in str(item.get('href')) else None
+                        )
 
-                    # Filter by URL keywords since text might just be "Download"
-                    if url and ("fy-202" in url.lower() or "quarter" in url.lower() or "consolidated" in url.lower()):
-                         # Derive title from URL if text is generic
-                         if text.lower() == "download":
-                             slug = url.split('/')[-2] if url.endswith('/') else url.split('/')[-1]
-                             # Clean up slug to make a readable title
-                             title = slug.replace('-', ' ').title()
-                         else:
-                             title = text
+                    if url and ("fy-202" in url.lower() or "fy-201" in url.lower() or "fy-201" in url.lower()):
+                        if text.lower() in ("download", ""):
+                            slug = url.split('/')[-2] if url.endswith('/') else url.split('/')[-1]
+                            title = slug.replace('-', ' ').title()
+                        else:
+                            title = text
 
-                         print(f"Found CoB Report: {title} -> {url}")
-                         report_links.append({"title": title, "url": url})
-                         
-                return report_links
+                        rtype = _report_type(url)
+                        print(f"Found CoB Report [{rtype}]: {title} -> {url}")
+                        report_links.append({"title": title, "url": url, "report_type": rtype})
+
+            return report_links
 
         except Exception as e:
             print(f"Error scraping CoB: {e}")
@@ -131,27 +141,63 @@ class CoBPoller:
         and persists their metadata to data/cache/cob_reports.json.
 
         When *ctx* is provided with *fiscal_years* populated, only reports
-        matching those years are downloaded (targeted mode). The COB URL
-        structure encodes the year as ``FY-YYYY-YYYY`` so matching is a simple
-        substring check with ``/`` replaced by ``-``.
+        whose URL matches one of those fiscal years are downloaded (targeted
+        mode).  For each matching fiscal year **every** available report is
+        collected — both full annual reports and all quarterly breakdowns —
+        to give IntelligentCoBParser the most complete financial picture
+        spanning the project timeline from start_date to completion_date.
 
-        FinancialService.ingest_cob_report() later parses each PDF and
-        writes FinancialRecord rows to the database.
+        FinancialService.ingest_cob_report_intelligent() parses each PDF using
+        GPT-4o Vision and writes FinancialRecord rows.
         """
         reports = await self.find_reports()
         if not reports:
             logger.warning("CoBPoller: no report links found.")
             return
 
-        # Targeted mode: filter to relevant fiscal years only
         if ctx and ctx.fiscal_years:
-            reports = [
-                r for r in reports
-                if any(fy.replace("/", "-") in r["url"] for fy in ctx.fiscal_years)
-            ]
+            # Build a candidate set for each target FY.
+            # COB URLs encode the fiscal year as e.g. "fy-2023-24" (short form)
+            # or "fy-2023-2024" (long form).  We check both.
+            def _fy_variants(fy: str) -> list[str]:
+                """Return URL fragments that identify a given FY string."""
+                parts = fy.split("/")           # ["2023", "2024"]
+                if len(parts) != 2:
+                    return [fy.replace("/", "-")]
+                y1, y2 = parts
+                return [
+                    f"fy-{y1}-{y2}",            # fy-2023-2024
+                    f"fy-{y1}-{y2[2:]}",         # fy-2023-24
+                ]
+
+            selected: list[dict] = []
+            for fy in ctx.fiscal_years:
+                variants = _fy_variants(fy)
+                matching = [
+                    r for r in reports
+                    if any(v in r["url"].lower() for v in variants)
+                ]
+                if not matching:
+                    continue
+                # Collect every available report for this FY:
+                # annual + all quarterly breakdowns for maximum coverage
+                selected.extend(matching)
+
+            # De-duplicate by URL
+            seen: set = set()
+            deduped: list[dict] = []
+            for r in selected:
+                if r["url"] not in seen:
+                    seen.add(r["url"])
+                    deduped.append(r)
+
+            reports = deduped
             logger.info(
                 f"CoBPoller: filtered to {len(reports)} reports "
-                f"for fiscal years {ctx.fiscal_years}"
+                f"for fiscal years {ctx.fiscal_years} "
+                f"({sum(1 for r in reports if r.get('report_type')=='annual')} annual, "
+                f"{sum(1 for r in reports if r.get('report_type')=='quarterly')} quarterly) "
+                f"— all report types retained for full timeline coverage"
             )
 
         # Load existing cache
@@ -176,11 +222,12 @@ class CoBPoller:
                     {
                         "title": rep["title"],
                         "url": rep["url"],
+                        "report_type": rep.get("report_type", "unknown"),
                         "local_path": local_path,
                         "status": "downloaded",
                     }
                 )
-                logger.info(f"CoBPoller: downloaded — {rep['title']}")
+                logger.info(f"CoBPoller: downloaded [{rep.get('report_type','?')}] — {rep['title']}")
 
         CACHE_PATH.write_text(
             json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"

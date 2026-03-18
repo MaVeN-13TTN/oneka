@@ -34,35 +34,31 @@ class NCAScraper(BaseScraper):
         terms = (ctx.search_terms if ctx and ctx.search_terms else self.SEARCH_TERMS)
         all_rows = []
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=False)
             page = await browser.new_page()
             
             for term in terms:
                 logger.info(f"Searching NCA for: {term}...")
                 try:
-                    await page.goto(self.BASE_URL, timeout=60000)
-                    
-                    # Debug: Print inputs and buttons
-                    logger.debug(f"Page Title: {await page.title()}")
-                    # inputs = await page.evaluate("""() => Array.from(document.querySelectorAll('input')).map(i => ({name: i.name, type: i.type, id: i.id}))""")
-                    # print(f"Inputs: {inputs}")
-                    # buttons = await page.evaluate("""() => Array.from(document.querySelectorAll('button')).map(b => ({text: b.innerText, type: b.type}))""")
-                    # print(f"Buttons: {buttons}")
+                    await page.goto(self.BASE_URL, timeout=60000, wait_until="domcontentloaded")
+                    # Wait for the search input to be in the DOM
+                    await page.wait_for_selector('input[name="parameter"]', state="attached", timeout=30000)
 
-                    # Simulate human interaction
-                    search_input = page.locator('input[name="parameter"]')
-                    await search_input.click()
-                    await search_input.fill(term) # type is slow, fill + wait is okay if we click button
-                    
-                    # Try to find the search button. 
-                    search_btn = page.locator('button[type="submit"], input[type="submit"], i.fa-search, span.fa-search')
-                    if await search_btn.count() > 0:
-                         await search_btn.first.click()
-                         logger.debug("Clicked search button")
-                    else:
-                         logger.debug("Search button not found, pressing Enter")
-                         await page.keyboard.press('Enter')
-                    
+                    logger.debug(f"Page Title: {await page.title()}")
+
+                    # Fill the search input and submit via JS to avoid Playwright
+                    # actionability-check timeouts on this site (element is not
+                    # considered "visible" by Playwright but is fully interactive).
+                    await page.evaluate(f"""() => {{
+                        const inp = document.querySelector('input[name="parameter"]');
+                        inp.value = {repr(term)};
+                        inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        inp.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        // Submit the approved-projects form (second form on the page)
+                        const form = Array.from(document.querySelectorAll('form'))
+                            .find(f => f.action.includes('approved-projects'));
+                        if (form) form.submit();
+                    }}""")
                     logger.info(f"Submitted search for {term}...")
                     
                     # Wait for results (table to appear)

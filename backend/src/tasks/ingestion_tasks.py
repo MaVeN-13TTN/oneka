@@ -109,6 +109,141 @@ def ingest_cob_report_task(self, pdf_path: str, fiscal_year: str):
 
 
 @celery_app.task(
+    name="src.tasks.ingestion_tasks.reparse_cob_task",
+    bind=True,
+    max_retries=0,
+)
+def reparse_cob_task(self, investigation_id: str):
+    """
+    Re-runs IntelligentCoBParser on all cached COB PDFs for an investigation.
+
+    Useful after a pipeline run where DB inserts failed (e.g. schema mismatch).
+    Does NOT re-download PDFs — reads directly from data/cache/cob_reports.json.
+    Filters to the investigation's fiscal_years when set (all cached PDFs otherwise).
+    Each PDF gets its own DB session so failures are isolated.
+    """
+    import json as _json
+    import os as _os
+    import uuid as _uuid_mod
+
+    from src.config import settings as _settings
+    from src.models.investigation import Investigation
+    from src.services.financial_service import FinancialService as _FinSvc
+
+    inv_uuid = _uuid_mod.UUID(investigation_id)
+
+    # Load investigation context
+    db = SessionLocal()
+    try:
+        inv = db.query(Investigation).filter(
+            Investigation.investigation_id == inv_uuid
+        ).first()
+        if not inv or not inv.project_context:
+            return {"status": "error", "reason": "investigation not found or has no context"}
+        ctx_dict = inv.project_context
+    finally:
+        db.close()
+
+    from data.context import ProjectContext as DataProjectContext
+    coords = ctx_dict.get("coordinates")
+    ctx = DataProjectContext(
+        canonical_name=ctx_dict.get("canonical_name"),
+        search_terms=ctx_dict.get("search_terms", []),
+        aliases=ctx_dict.get("aliases", []),
+        coordinates=tuple(coords) if coords and len(coords) == 2 else None,
+        fiscal_years=ctx_dict.get("fiscal_years", []),
+        procuring_entity=ctx_dict.get("procuring_entity"),
+        project_start_date=ctx_dict.get("project_start_date"),
+        project_completion_date=ctx_dict.get("project_completion_date"),
+        ministry=ctx_dict.get("ministry"),
+        county=ctx_dict.get("county"),
+        vote_head=(
+            str(ctx_dict["vote_head"])
+            if ctx_dict.get("vote_head") is not None
+            else None
+        ),
+    )
+
+    # Read COB cache and filter by fiscal_years if available
+    from data.scrapers.cob import CACHE_PATH as _COB_CACHE_PATH
+    cached: list[dict] = []
+    if _COB_CACHE_PATH.exists():
+        try:
+            cached = _json.loads(_COB_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    if ctx.fiscal_years:
+        def _fy_variants(fy: str) -> list[str]:
+            parts = fy.split("/")
+            if len(parts) != 2:
+                return [fy.replace("/", "-")]
+            y1, y2 = parts
+            return [f"fy-{y1}-{y2}", f"fy-{y1}-{y2[2:]}"]
+
+        selected: list[dict] = []
+        seen: set = set()
+        for fy in ctx.fiscal_years:
+            variants = _fy_variants(fy)
+            for r in cached:
+                if r["url"] not in seen and any(v in r["url"].lower() for v in variants):
+                    selected.append(r)
+                    seen.add(r["url"])
+        pdfs_to_parse = selected
+    else:
+        pdfs_to_parse = [r for r in cached if r.get("local_path")]
+
+    total_records = 0
+    failed = 0
+    import os as _os
+    import concurrent.futures as _cf
+
+    valid_pdfs = [
+        e for e in pdfs_to_parse
+        if e.get("local_path") and _os.path.exists(e["local_path"])
+    ]
+
+    def _parse_one(entry: dict) -> tuple[int, bool]:
+        """Parse one PDF in its own DB session + event loop."""
+        _pdf = entry["local_path"]
+        _rtype = entry.get("report_type", "unknown")
+        _db_sess = SessionLocal()
+        try:
+            _fin_svc = _FinSvc(_db_sess)
+            _n = _fin_svc.ingest_cob_report_intelligent(
+                pdf_path=_pdf,
+                ctx=ctx,
+                openai_api_key=_settings.openai_api_key,
+                model=_settings.openai_vision_model,
+                cost_limit_usd=2.0,
+            )
+            logger.info(f"reparse_cob_task: [{_rtype}] {_pdf} → {_n} records")
+            return (_n, False)
+        except Exception as exc:
+            _db_sess.rollback()
+            logger.warning(f"reparse_cob_task: [{_rtype}] {_pdf} failed: {exc}")
+            return (0, True)
+        finally:
+            _db_sess.close()
+
+    with _cf.ThreadPoolExecutor(max_workers=4) as pool:
+        for _n, _err in pool.map(_parse_one, valid_pdfs):
+            total_records += _n
+            if _err:
+                failed += 1
+
+    result = {
+        "status": "ok",
+        "investigation_id": investigation_id,
+        "pdfs_processed": len(valid_pdfs),
+        "records_inserted": total_records,
+        "failed": failed,
+    }
+    logger.info(f"reparse_cob_task complete: {result}")
+    return result
+
+
+@celery_app.task(
     name="src.tasks.ingestion_tasks.refresh_kmhfl_task",
     bind=True,
     max_retries=2,
@@ -235,6 +370,8 @@ def investigate_project_task(self, investigation_id: str):
                 coordinates=tuple(coords) if coords and len(coords) == 2 else None,
                 fiscal_years=ctx_dict.get("fiscal_years", []),
                 procuring_entity=ctx_dict.get("procuring_entity"),
+                project_start_date=ctx_dict.get("project_start_date"),
+                project_completion_date=ctx_dict.get("project_completion_date"),
                 ministry=ctx_dict.get("ministry"),
                 county=ctx_dict.get("county"),
                 vote_head=(
@@ -258,10 +395,45 @@ def investigate_project_task(self, investigation_id: str):
         scrape_start = datetime.now(timezone.utc)
         stage_counts: dict[str, int] = {}
 
+        # Determine whether to use EGP or PPIP for tender records.
+        # EGP (egpkenya.go.ke) only holds tenders awarded from ~July 2025 onwards.
+        # PPIP (tenders.go.ke) holds the full historical archive.
+        # Logic: use EGP if project_start_date is on or after 2025-07-01,
+        # otherwise (or if unknown) go straight to PPIP.
+        _start = ctx.project_start_date or ctx_dict.get("award_date") or ""
+        _use_egp = bool(_start) and _start[:7] >= "2025-07"
+
+        if _use_egp:
+            logger.info("investigate_project_task: project start ≥ Jul-2025 — using EGP")
+            try:
+                egp_scraper = EGPScraper()
+                data = _run(egp_scraper.fetch(ctx=ctx))
+                count = _run(egp_scraper.save(data)) if data else 0
+                stage_counts["egp"] = count
+                logger.info(f"investigate_project_task: egp → {count}")
+            except Exception as exc:
+                logger.warning(f"investigate_project_task: egp failed: {exc}")
+                stage_counts["egp"] = 0
+            stage_counts["ppip"] = 0
+        else:
+            logger.info(
+                "investigate_project_task: project pre-dates Jul-2025 (start=%s) — using PPIP",
+                _start or "unknown",
+            )
+            stage_counts["egp"] = 0
+            try:
+                ppip_scraper = PPIPScraper()
+                data = _run(ppip_scraper.fetch(ctx=ctx))
+                count = _run(ppip_scraper.save(data)) if data else 0
+                stage_counts["ppip"] = count
+                logger.info(f"investigate_project_task: ppip → {count}")
+            except Exception as exc:
+                logger.warning(f"investigate_project_task: ppip failed: {exc}")
+                stage_counts["ppip"] = 0
+
+        # 3. Run remaining scrapers
         for label, cls in [
-            ("egp", EGPScraper),
             ("nca", NCAScraper),
-            ("ppip", PPIPScraper),
             ("kmhfl", KMHFLScraper),
         ]:
             try:
@@ -276,11 +448,87 @@ def investigate_project_task(self, investigation_id: str):
 
         try:
             poller = CoBPoller()
+            # Record which PDFs are cached before the download so we can parse
+            # only the newly acquired reports for this investigation.
+            from data.scrapers.cob import CACHE_PATH as _COB_CACHE_PATH
+            import json as _json
+            _pre_cached_urls: set = set()
+            if _COB_CACHE_PATH.exists():
+                try:
+                    _pre_cached_urls = {
+                        r["url"]
+                        for r in _json.loads(_COB_CACHE_PATH.read_text(encoding="utf-8"))
+                    }
+                except Exception:
+                    pass
+
             _run(poller.process(ctx=ctx))
-            stage_counts["cob"] = 1
+
+            # Find PDFs newly downloaded during this run (with full metadata)
+            _new_pdf_entries: list[dict] = []
+            if _COB_CACHE_PATH.exists():
+                try:
+                    for r in _json.loads(_COB_CACHE_PATH.read_text(encoding="utf-8")):
+                        if r["url"] not in _pre_cached_urls and r.get("local_path"):
+                            _new_pdf_entries.append(r)
+                except Exception:
+                    pass
+
+            # Parse every newly downloaded report with IntelligentCoBParser (GPT-4o Vision).
+            # Both annual and quarterly PDFs are parsed to give full financial coverage
+            # across the project timeline.
+            # PDFs are processed in parallel (ThreadPoolExecutor) — each gets its own
+            # DB session and asyncio event loop so failures are fully isolated.
+            # Within each PDF, Vision API calls are also parallelised (asyncio.gather).
+            cob_fin_count = 0
+            if _new_pdf_entries:
+                import os as _os
+                import concurrent.futures as _cf
+                from src.config import settings as _settings
+                from src.services.financial_service import FinancialService as _FinSvc
+
+                _valid_entries = [
+                    e for e in _new_pdf_entries if _os.path.exists(e.get("local_path", ""))
+                ]
+
+                def _parse_pdf_entry(entry: dict) -> tuple[str, int]:
+                    """Parse one PDF in its own DB session + event loop."""
+                    _pdf = entry["local_path"]
+                    _rtype = entry.get("report_type", "unknown")
+                    _db2 = _db()
+                    try:
+                        _fin_svc = _FinSvc(_db2)
+                        _n = _fin_svc.ingest_cob_report_intelligent(
+                            pdf_path=_pdf,
+                            ctx=ctx,
+                            openai_api_key=_settings.openai_api_key,
+                            model=_settings.openai_vision_model,
+                            cost_limit_usd=2.0,
+                        )
+                        logger.info(
+                            f"investigate_project_task: [{_rtype}] {_pdf} → {_n} records"
+                        )
+                        return (_pdf, _n)
+                    except Exception as exc:
+                        _db2.rollback()
+                        logger.warning(
+                            f"investigate_project_task: [{_rtype}] {_pdf} failed: {exc}"
+                        )
+                        return (_pdf, 0)
+                    finally:
+                        _db2.close()
+
+                # 4 PDFs in parallel × 8 Vision calls each = up to 32 concurrent API calls
+                with _cf.ThreadPoolExecutor(max_workers=4) as _pool:
+                    for _pdf_path, _n in _pool.map(_parse_pdf_entry, _valid_entries):
+                        cob_fin_count += _n
+
+            stage_counts["cob"] = len(_new_pdf_entries)
+            stage_counts["cob_financial_records"] = cob_fin_count
         except Exception as exc:
             logger.warning(f"investigate_project_task: cob failed: {exc}")
             stage_counts["cob"] = 0
+            stage_counts["cob_financial_records"] = 0
 
         # ── 3. Tag rows created during this scrape window ─────────────────────
         # Rows are tagged by created_at timestamp.  Low-concurrency MVP assumption:

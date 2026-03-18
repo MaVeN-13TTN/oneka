@@ -225,8 +225,42 @@ else
 fi
 echo ""
 
-# ── Step 8: Quick database connectivity check ─────────────────────────────
-echo -e "${BOLD}━━ Step 8: Database Connection Check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+# ── Step 8: Perplexity AI API key ───────────────────────────────────────────
+echo -e "${BOLD}━━ Step 8: Perplexity AI API Key ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "Required for the single-project investigation pipeline enrichment stage."
+echo "Register and get a key at: https://www.perplexity.ai/settings/api"
+echo "See: docs/08-setup-and-running/ENV_SETUP.md § 6 for setup details."
+echo "Press Enter to skip."
+echo ""
+read -rp "Perplexity API Key (starts with pplx-) [skip]: " PERPLEXITY_KEY
+if [[ -n "$PERPLEXITY_KEY" ]]; then
+    set_env "$BACKEND_ENV" "PERPLEXITY_API_KEY" "$PERPLEXITY_KEY"
+    success "Perplexity API key written to backend/.env"
+else
+    warn "Perplexity key skipped — investigation enrichment will use manual context fallback"
+fi
+echo ""
+
+# ── Step 9: OpenAI API key ────────────────────────────────────────────────
+echo -e "${BOLD}━━ Step 9: OpenAI API Key ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "Required for the IntelligentCoBParser (GPT-4o Vision) — parsing CoB BIRR PDFs."
+echo "Get a key at: https://platform.openai.com/api-keys"
+echo "See: docs/08-setup-and-running/ENV_SETUP.md § 7 for cost details (~\$0.10–\$1.50/investigation)."
+echo "Press Enter to skip."
+echo ""
+read -rp "OpenAI API Key (starts with sk-) [skip]: " OPENAI_KEY
+if [[ -n "$OPENAI_KEY" ]]; then
+    set_env "$BACKEND_ENV" "OPENAI_API_KEY" "$OPENAI_KEY"
+    success "OpenAI API key written to backend/.env"
+else
+    warn "OpenAI key skipped — IntelligentCoBParser will be unavailable; standard CoBParser will be used"
+fi
+echo ""
+
+# ── Step 10: Quick database connectivity check ────────────────────────────
+echo -e "${BOLD}━━ Step 10: Database Connection Check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 if PGPASSWORD="$DB_PASSWORD" psql -U oneka_user -d oneka_dev -h localhost -c "SELECT 1;" &>/dev/null 2>&1; then
     success "Connected to oneka_dev — database is ready"
@@ -255,6 +289,10 @@ grep -qE "your_aws_(access_key|secret_key)" "$BACKEND_ENV" && \
     NEEDS_CREDS+=("AWS credentials         — S3 tile/GeoTIFF storage")
 grep -q "your_google_maps_api_key" "$BACKEND_ENV" && \
     NEEDS_CREDS+=("Google Maps API key     — map tiles proxy")
+grep -q "your_perplexity_api_key" "$BACKEND_ENV" && \
+    NEEDS_CREDS+=("Perplexity API key      — investigation enrichment (§ 6)")
+grep -q "your_openai_api_key" "$BACKEND_ENV" && \
+    NEEDS_CREDS+=("OpenAI API key          — IntelligentCoBParser Vision (§ 7)")
 
 if [[ ${#NEEDS_CREDS[@]} -gt 0 ]]; then
     warn "Still using placeholders for:"

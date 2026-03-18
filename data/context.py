@@ -28,6 +28,8 @@ class ProjectContext:
     coordinates: Optional[tuple[float, float]] = None  # (lat, lon)
     fiscal_years: list[str] = field(default_factory=list)
     procuring_entity: Optional[str] = None
+    project_start_date: Optional[str] = None       # YYYY-MM-DD or YYYY
+    project_completion_date: Optional[str] = None  # YYYY-MM-DD or YYYY; None if ongoing
     # Additional fields used by IntelligentCoBParser (Stage 2 Vision extraction)
     ministry: Optional[str] = None
     county: Optional[str] = None

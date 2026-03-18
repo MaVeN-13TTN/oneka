@@ -87,10 +87,10 @@ class FinancialRecord(Base, TimestampMixin):
 
     # Reporting Period
     reporting_period = Column(
-        String(20),
+        String(50),
         nullable=True,
         index=True,
-        comment="Reporting period: 'Q1 2024', 'FY 2023/24'",
+        comment="Reporting period: 'Q1 2024', 'FY 2023/24', 'First Nine Months FY 2019/20'",
     )
 
     period_start_date = Column(

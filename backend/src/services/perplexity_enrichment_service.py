@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 import httpx
@@ -38,36 +38,100 @@ logger = logging.getLogger(__name__)
 # ── Low-confidence threshold ───────────────────────────────────────────────────
 _LOW_CONFIDENCE_THRESHOLD = 0.6
 
+_FY_RE = re.compile(r"^(\d{4})/(\d{4})$")
+
+
+def _fy_from_date(date_str: str) -> str:
+    """Return the Kenya fiscal year string (YYYY/YYYY) that contains `date_str`.
+
+    Kenya FY runs July 1 – June 30:
+      - Jan–Jun 2022  → FY 2021/2022
+      - Jul–Dec 2022  → FY 2022/2023
+    """
+    year = int(date_str[:4])
+    month = int(date_str[5:7]) if len(date_str) >= 7 else 7
+    if month >= 7:
+        return f"{year}/{year + 1}"
+    return f"{year - 1}/{year}"
+
+
+def _fiscal_years_range(start_str: str | None, end_str: str | None) -> list[str]:
+    """Return every Kenya FY from start date to end date (inclusive).
+
+    If end is None, runs to the current FY.
+    """
+    if not start_str:
+        return []
+    first_fy_year = int(_fy_from_date(start_str)[:4])
+
+    if end_str:
+        last_fy_year = int(_fy_from_date(end_str)[:4])
+    else:
+        today = date.today()
+        last_fy_year = today.year if today.month >= 7 else today.year - 1
+
+    if last_fy_year < first_fy_year:
+        last_fy_year = first_fy_year
+
+    return [f"{y}/{y + 1}" for y in range(first_fy_year, last_fy_year + 1)]
+
+
+def _validate_fiscal_years(raw: list[str]) -> list[str]:
+    """Keep only properly formatted FY strings (YYYY/YYYY, second = first + 1)."""
+    valid = []
+    for fy in raw:
+        m = _FY_RE.match(str(fy))
+        if m and int(m.group(2)) == int(m.group(1)) + 1:
+            valid.append(fy)
+    return valid
+
 # ── Prompt template ────────────────────────────────────────────────────────────
 _QUERY_TEMPLATE = """\
-You are a Kenya government infrastructure research analyst.
-Find detailed information about the following government-funded \
-construction project in Kenya.
+You are a Kenya government infrastructure research analyst with access to \
+current news, official procurement portals, and government reports.
+
+Research the following Kenya government-funded construction project and return \
+precise factual information. Pay special attention to any official name changes \
+(e.g. a project that was initially called X and later renamed to Y).
 
 Project name: {project_name}
 User notes: {user_notes}
 
-Return a JSON object with ONLY the following fields (use null if unknown):
+Return a JSON object with EXACTLY the following fields (use null if genuinely unknown):
 {{
-  "canonical_name": "official project name as it appears in government documents",
-  "county": "Kenya county name",
-  "constituency": "constituency name",
-  "ward": "ward name",
+  "canonical_name": "CURRENT official name — use the latest gazetted or \
+officially announced name, even if different from the input name above",
+  "historical_names": ["older name 1", "older name 2"],
+  "county": "Kenya county name (single county, or primary county if multi-county)",
+  "constituency": "constituency name or null",
+  "ward": "ward name or null",
   "coordinates": [latitude, longitude] or null,
-  "project_type": one of HEALTH|ROADS|EDUCATION|WATER|MARKETS|OTHER,
+  "project_type": "one of HEALTH | ROADS | EDUCATION | WATER | MARKETS | STADIUMS | OTHER",
   "estimated_value_kes": number in KES or null,
-  "contractor_name": "name of contractor/developer",
-  "procuring_entity": "full name of government entity procuring",
-  "award_date": "YYYY-MM-DD or YYYY or null",
-  "fiscal_years": ["YYYY/YYYY", ...],
-  "ministry": "Ministry name for COB budget line",
-  "vote_head": integer vote head number or null,
-  "aliases": ["alternative name 1", "alternative name 2"],
+  "contractor_name": "primary contractor name or null",
+  "procuring_entity": "full name of government entity procuring this project",
+  "ministry": "parent Ministry name as it appears in the COB BIRR budget vote (e.g. \
+'Ministry of Sports, Culture and Heritage')",
+  "vote_head": integer budget vote head number or null,
+  "award_date": "YYYY-MM-DD or YYYY — date contract was awarded or null",
+  "project_start_date": "YYYY-MM-DD or YYYY — when on-site construction began or null",
+  "project_completion_date": "YYYY-MM-DD or YYYY — actual/expected completion \
+date or null if still ongoing or unknown",
+  "fiscal_years": ["YYYY/YYYY", ...] — ALL Kenya fiscal years (July–June) \
+from project_start_date to project_completion_date (or current FY if ongoing). \
+Each entry MUST be in format YYYY/YYYY where the second year equals first + 1, \
+e.g. ["2021/2022", "2022/2023", "2023/2024"]. Leave [] only if start date is unknown,
   "source_urls": ["url1", "url2"],
-  "confidence": float between 0.0 and 1.0
+  "confidence": float 0.0–1.0 reflecting how certain you are of the above facts
 }}
 
-Return JSON only. Do not include any explanation or markdown.
+IMPORTANT RULES:
+- canonical_name must be the CURRENT official name (post any renaming)
+- List ALL previous names under historical_names (they become scraper search aliases)
+- fiscal_years: Kenya FY runs July 1 – June 30. A project starting in March 2022 \
+begins in FY 2021/2022. A project starting August 2022 begins in FY 2022/2023. \
+Include every FY from first to last year of activity.
+- Return JSON only. No markdown, no explanations.
 """
 
 
@@ -208,13 +272,12 @@ class PerplexityEnrichmentService:
         parsed: dict[str, Any],
     ) -> ProjectContext:
         """Map the parsed Perplexity dict to a ProjectContext."""
-        # Validate coordinates — must be [lat, lon] with plausible Kenya bounds
+        # Validate coordinates — must be [lat, lon] within Kenya bounds
         raw_coords = parsed.get("coordinates")
         coordinates: tuple[float, float] | None = None
         if isinstance(raw_coords, (list, tuple)) and len(raw_coords) == 2:
             try:
                 lat, lon = float(raw_coords[0]), float(raw_coords[1])
-                # Kenya bounding box: lat -4.7 to 4.6, lon 33.9 to 41.9
                 if -4.7 <= lat <= 4.6 and 33.9 <= lon <= 41.9:
                     coordinates = (lat, lon)
                 else:
@@ -225,19 +288,38 @@ class PerplexityEnrichmentService:
             except (TypeError, ValueError):
                 pass
 
-        # Ensure fiscal_years and aliases are lists of strings
-        fiscal_years: list[str] = [
-            str(y) for y in (parsed.get("fiscal_years") or [])
-            if y is not None
+        # Merge canonical aliases + historical_names into one aliases list
+        aliases_raw: list[str] = [
+            str(a) for a in (parsed.get("aliases") or []) if a is not None
         ]
-        aliases: list[str] = [
-            str(a) for a in (parsed.get("aliases") or [])
-            if a is not None
-        ]
+        for hn in (parsed.get("historical_names") or []):
+            if hn and str(hn) not in aliases_raw:
+                aliases_raw.append(str(hn))
+        # Always include the raw input project_name as an alias if it differs
+        if project_name and project_name not in aliases_raw:
+            # Only add if different from canonical
+            canonical = parsed.get("canonical_name") or ""
+            if project_name.lower() != canonical.lower():
+                aliases_raw.append(project_name)
+
         source_urls: list[str] = [
-            str(u) for u in (parsed.get("source_urls") or [])
-            if u is not None
+            str(u) for u in (parsed.get("source_urls") or []) if u is not None
         ]
+
+        # Dates
+        start_date = parsed.get("project_start_date") or None
+        completion_date = parsed.get("project_completion_date") or None
+
+        # Fiscal years: validate what Perplexity gave us, fall back to date-derived range
+        raw_fiscal = [str(y) for y in (parsed.get("fiscal_years") or []) if y is not None]
+        fiscal_years = _validate_fiscal_years(raw_fiscal)
+        if not fiscal_years and start_date:
+            fiscal_years = _fiscal_years_range(start_date, completion_date)
+            if fiscal_years:
+                logger.info(
+                    "Perplexity fiscal_years invalid/missing — derived %s from dates",
+                    fiscal_years,
+                )
 
         # Clamp confidence to [0, 1]
         raw_conf = parsed.get("confidence", 0.0)
@@ -256,9 +338,11 @@ class PerplexityEnrichmentService:
             contractor_name=parsed.get("contractor_name") or None,
             procuring_entity=parsed.get("procuring_entity") or None,
             award_date=parsed.get("award_date") or None,
+            project_start_date=start_date,
+            project_completion_date=completion_date,
             fiscal_years=fiscal_years,
             source_urls=source_urls,
-            aliases=aliases,
+            aliases=aliases_raw,
             ministry=parsed.get("ministry") or None,
             vote_head=parsed.get("vote_head") or None,
             enrichment_confidence=confidence,
@@ -266,7 +350,6 @@ class PerplexityEnrichmentService:
             enriched_at=datetime.now(timezone.utc),
         )
 
-        # Derive search_terms from the enriched context
         ctx.search_terms = self._derive_search_terms(ctx)
         return ctx
 

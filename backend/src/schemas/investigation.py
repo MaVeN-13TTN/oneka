@@ -60,6 +60,13 @@ class ProjectContext(BaseModel):
     award_date: Optional[str] = Field(
         None, description="Contract award date (ISO 8601 or YYYY)"
     )
+    project_start_date: Optional[str] = Field(
+        None, description="When on-site construction began (YYYY-MM-DD or YYYY)"
+    )
+    project_completion_date: Optional[str] = Field(
+        None,
+        description="Expected or actual completion date (YYYY-MM-DD or YYYY; null if ongoing)"
+    )
     fiscal_years: list[str] = Field(
         default_factory=list,
         description='Fiscal years the project spans e.g. ["2021/2022", "2022/2023"]',
@@ -141,6 +148,8 @@ class PatchContextRequest(BaseModel):
     contractor_name: Optional[str] = None
     procuring_entity: Optional[str] = None
     award_date: Optional[str] = None
+    project_start_date: Optional[str] = None
+    project_completion_date: Optional[str] = None
     fiscal_years: Optional[list[str]] = None
     aliases: Optional[list[str]] = None
     search_terms: Optional[list[str]] = None
